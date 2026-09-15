@@ -210,10 +210,14 @@ def match_sections(template_headings, reference_headings):
 
 def migrate_sections(template_doc, reference_doc, matched):
     """
-    For each matched (template, reference) pair, replace the template's
-    body content with the reference's body content.
+    For each matched (template, reference) pair, INSERT the reference's
+    body content into the template right after the heading — without
+    deleting the template's existing pre-populated body content.
 
-    Processed bottom-to-top so that insertions/deletions in lower sections
+    The template's pre-populated content (black, normal font) is preserved.
+    Red italic instruction text is removed separately by delete_red_italic_text().
+
+    Processed bottom-to-top so that insertions in lower sections
     do not shift the positions of upper sections still to be processed.
 
     Track Changes must already be ON on template_doc.
@@ -230,13 +234,9 @@ def migrate_sections(template_doc, reference_doc, matched):
     migrated = 0
     for tmpl_h, ref_h in sorted_matches:
         ref_body_len = ref_h["body_end"] - ref_h["body_start"]
-        tmpl_body_len = tmpl_h["body_end"] - tmpl_h["body_start"]
 
         if ref_body_len <= 1:
             print(f"  [SKIP] \"{ref_h['text']}\" — reference body is empty")
-            continue
-        if tmpl_body_len <= 0:
-            print(f"  [SKIP] \"{tmpl_h['text']}\" — template body has zero length")
             continue
 
         print(f"  [MIGRATE] \"{tmpl_h['text']}\" ← ref \"{ref_h['text']}\"")
@@ -246,9 +246,12 @@ def migrate_sections(template_doc, reference_doc, matched):
             ref_body = reference_doc.Range(ref_h["body_start"], ref_h["body_end"])
             ref_body.Copy()
 
-            # Step 2 — paste over template body (tracked deletion + insertion)
-            tmpl_body = template_doc.Range(tmpl_h["body_start"], tmpl_h["body_end"])
-            tmpl_body.Paste()
+            # Step 2 — INSERT at body start (collapsed range = no deletion)
+            # This preserves all existing template body content below.
+            insert_point = template_doc.Range(
+                tmpl_h["body_start"], tmpl_h["body_start"]
+            )
+            insert_point.Paste()
 
             migrated += 1
         except Exception as exc:
