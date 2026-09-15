@@ -20,6 +20,7 @@ import os
 import sys
 import re
 import time
+import shutil
 import argparse
 import win32com.client
 import pythoncom
@@ -265,75 +266,118 @@ def migrate_sections(template_doc, reference_doc, matched):
 # RED-ITALIC INSTRUCTION TEXT DELETION
 # ============================================================================
 
-def is_red_color(color_value):
+def is_red(color_value, color_index=None):
     """
-    Check whether a Word Font.Color value is 'red'.
-    Word stores colours in BGR: Blue*65536 + Green*256 + Red.
+    Check whether a Word color is red.
+    Word stores RGB as BGR in Font.Color: Blue*65536 + Green*256 + Red.
+    Font.ColorIndex: wdRed = 6, wdDarkRed = 13.
+    """
+    if color_index in (6, 13):
+        return True
 
-    Accepts any colour with R > 180, G < 80, B < 80,
-    covering pure red RGB(255,0,0)=255, dark red RGB(192,0,0)=192, etc.
-    """
-    if color_value is None or color_value < 0:
-        return False  # wdColorAutomatic / undefined
+    if color_value is None or not isinstance(color_value, int):
+        return False
+
+    if color_value < 0 or color_value == 9999999:  # wdUndefined or wdColorAutomatic
+        return False
+
     r = color_value & 0xFF
     g = (color_value >> 8) & 0xFF
     b = (color_value >> 16) & 0xFF
-    return r > 180 and g < 80 and b < 80
+
+    # Red must be distinctly dominant and bright enough
+    return (r > 140) and (g < 110) and (b < 110) and (r > g + 40)
+
+
+def _delete_red_italic_words(para_range):
+    """Scan words within a mixed-formatting paragraph and delete red italic words."""
+    count = 0
+    try:
+        words = para_range.Words
+        w_count = words.Count
+        for w_idx in range(w_count, 0, -1):
+            try:
+                w = words.Item(w_idx)
+                w_font = w.Font
+                if w_font.Italic in (True, -1) and is_red(w_font.Color, w_font.ColorIndex):
+                    w.Delete()
+                    count += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return count
 
 
 def delete_red_italic_text(doc):
     """
-    Find every run of italic text in the document body, check if its
-    colour is red-ish, and delete it.  With TrackRevisions ON every
-    deletion is recorded as a tracked change.
+    Find and delete all text formatted as Red + Italic.
+    With TrackRevisions ON, deletions appear as tracked changes.
 
-    Strategy:
-      • Use Word Find (Format = True, Font.Italic = True) to jump from
-        one italic run to the next — fast even in large documents.
-      • For each match, test Font.Color with is_red_color().
-      • If red → delete (tracked); restart search from doc start.
-      • If not red → advance past the match and continue.
-
-    Returns the number of deletions made.
+    Iterates paragraphs in reverse order:
+      - If an entire paragraph is Italic + Red -> delete paragraph range
+      - If a paragraph has mixed formatting -> inspect words and delete red italic words
+      - Explicitly protects heading styles from deletion
     """
     print("\n  [INFO] Scanning for red italic instruction text...")
     delete_count = 0
-    max_iter = 500  # safety cap
+    WD_UNDEFINED = 9999999
 
-    search_range = doc.Range(0, doc.Content.End)
+    para_count = doc.Paragraphs.Count
+    print(f"  [INFO] Checking {para_count} paragraphs...")
 
-    for _ in range(max_iter):
-        find = search_range.Find
-        find.ClearFormatting()
-        find.Font.Italic = True
-        find.Text = ""           # any text with this formatting
-        find.Forward = True
-        find.Wrap = WD_FIND_STOP
-        find.Format = True       # honour the Font criteria
+    # Iterate backwards so deletions don't shift indices of remaining paragraphs
+    for i in range(para_count, 0, -1):
+        try:
+            para = doc.Paragraphs.Item(i)
+        except Exception:
+            continue
 
-        if not find.Execute():
-            break  # no more italic text in the range
+        # Never delete headings
+        try:
+            if para.Style.NameLocal in HEADING_STYLE_NAMES:
+                continue
+        except Exception:
+            pass
 
-        # Guard: zero-length match → advance
-        if search_range.Start >= search_range.End:
-            break
+        rng = para.Range
+        font = rng.Font
 
-        font_color = search_range.Font.Color
-        if is_red_color(font_color):
-            preview = search_range.Text[:80].replace("\r", "↵")
-            print(f"  [DELETE] \"{preview}\"")
-            search_range.Delete()
-            delete_count += 1
-            # Restart from the beginning (positions shifted)
-            search_range = doc.Range(0, doc.Content.End)
-        else:
-            # Not red — skip forward
-            next_start = search_range.End
-            if next_start >= doc.Content.End:
-                break
-            search_range = doc.Range(next_start, doc.Content.End)
+        try:
+            italic_val = font.Italic
+        except Exception:
+            continue
 
-    print(f"  [INFO] Deleted {delete_count} red-italic block(s).")
+        # Fast path: Paragraph is not italic at all
+        if italic_val == 0 or italic_val is False:
+            continue
+
+        # Fast path: Entire paragraph is italic
+        if italic_val in (True, -1):
+            try:
+                color_val = font.Color
+                color_idx = font.ColorIndex
+            except Exception:
+                color_val = None
+                color_idx = None
+
+            if is_red(color_val, color_idx):
+                preview = rng.Text[:60].replace("\r", " ").strip()
+                if preview:
+                    print(f"  [DELETE] \"{preview}\"")
+                rng.Delete()
+                delete_count += 1
+                continue
+            elif color_val == WD_UNDEFINED:
+                # Mixed colors within italic paragraph
+                delete_count += _delete_red_italic_words(rng)
+                continue
+
+        # Mixed italic formatting within paragraph
+        if italic_val == WD_UNDEFINED:
+            delete_count += _delete_red_italic_words(rng)
+
+    print(f"  [INFO] Deleted {delete_count} red-italic instruction block(s).")
     return delete_count
 
 
@@ -344,16 +388,14 @@ def delete_red_italic_text(doc):
 def run_migration(template_path, reference_path, output_path=None):
     """
     Full pipeline:
-      1. Open both documents (Word invisible)
-      2. Detect report type from reference filename
-      3. Build section maps
-      4. Match sections
-      5. Migrate matched content (tracked)
-      6. Delete red-italic instruction text (tracked)
-      7. Save output
-
-    This function is designed to be called from the Phase 3 GUI.
-    It prints progress to stdout; a future version can accept a callback.
+      1. Create a clean working copy of template at output_path (template is untouched!)
+      2. Open both documents in Word (Word invisible)
+      3. Detect report type from reference filename
+      4. Build section maps
+      5. Match sections
+      6. Migrate matched content (tracked)
+      7. Delete red-italic instruction text (tracked)
+      8. Save output
     """
     template_path  = os.path.abspath(template_path)
     reference_path = os.path.abspath(reference_path)
@@ -361,6 +403,26 @@ def run_migration(template_path, reference_path, output_path=None):
         base, ext = os.path.splitext(template_path)
         output_path = base + "_draft_output" + ext
     output_path = os.path.abspath(output_path)
+
+    if not os.path.isfile(template_path):
+        raise FileNotFoundError(f"Template not found: {template_path}")
+    if not os.path.isfile(reference_path):
+        raise FileNotFoundError(f"Reference report not found: {reference_path}")
+
+    # Guard: Ensure output file is not locked by an existing open Word window
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except PermissionError:
+            raise RuntimeError(
+                f"Cannot write to '{os.path.basename(output_path)}'. "
+                f"Please close the document in Word and run the script again."
+            )
+
+    # Copy template to output_path at the OS level BEFORE touching Word.
+    # This guarantees the original template is NEVER opened, locked, or modified by Word!
+    print(f"[INFO] Creating clean working copy from template -> {os.path.basename(output_path)}")
+    shutil.copy2(template_path, output_path)
 
     word = None
     template_doc = None
@@ -385,14 +447,15 @@ def run_migration(template_path, reference_path, output_path=None):
 
         # ---- Open documents ----
         reference_doc = word.Documents.Open(reference_path, ReadOnly=True)
-        print(f"[INFO] Opened reference:  {os.path.basename(reference_path)}")
+        print(f"[INFO] Opened reference (read-only): {os.path.basename(reference_path)}")
 
-        template_doc = word.Documents.Open(template_path)
-        print(f"[INFO] Opened template:   {os.path.basename(template_path)}")
+        # Open the working copy at output_path. Original template_path is NEVER opened.
+        template_doc = word.Documents.Open(output_path)
+        print(f"[INFO] Opened working copy:          {os.path.basename(output_path)}")
 
         # ---- Track Changes ON ----
         template_doc.TrackRevisions = True
-        print("[INFO] Track Changes → ON\n")
+        print("[INFO] Track Changes -> ON\n")
 
         # ---- Build section maps ----
         print("--- Section map: Reference ---")
@@ -406,7 +469,7 @@ def run_migration(template_path, reference_path, output_path=None):
         matched, _, _ = match_sections(tmpl_headings, ref_headings)
 
         # ---- Migrate ----
-        print(f"\n--- Migrating content (bottom → top) ---")
+        print(f"\n--- Migrating content (bottom -> top) ---")
         migrated = migrate_sections(template_doc, reference_doc, matched)
 
         # ---- Delete red-italic ----
@@ -414,10 +477,8 @@ def run_migration(template_path, reference_path, output_path=None):
         deleted = delete_red_italic_text(template_doc)
 
         # ---- Save ----
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        template_doc.SaveAs2(output_path, FileFormat=WD_FORMAT_XML_DOC)
-        print(f"\n[INFO] Saved: {output_path}")
+        template_doc.Save()
+        print(f"\n[INFO] Saved output document: {output_path}")
 
         # ---- Summary ----
         print("\n" + "=" * 60)
