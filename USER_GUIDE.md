@@ -8,11 +8,14 @@ This desktop application automates drafting Model Risk Management review reports
 ## 🎨 Design & Experience Highlights
 
 - **Citizens Bank Green Theme**: Branded with Citizens Bank's hallmark green (`#008450`).
-- **Clean Minimalist Architecture**: Pure Apple/Teams card layout without terminal/log clutter.
+- **Clean Minimalist Architecture**: Pure Apple/Teams card layout with no terminal or log clutter.
 - **Side-by-Side (左右排版) Layout**:
   - **Left Dropzone**: New Report Template + Target Report Type pill toggle (**Assessment** vs. **Affirmation**).
   - **Right Dropzone**: Reference Report with real-time classification auto-detection badge.
 - **Dual Upload Support**: Drag and drop `.docx` files directly from File Explorer, or click anywhere on the dropzone to browse.
+- **Taller & Prominent Action Button**: High-contrast "Generate Draft Report" button.
+- **Zero Console Clutter**: Launches seamlessly with no lingering Command Prompt window behind the UI.
+- **Streamlined Completion Modal**: Elegant horizontal checkmark badge with quick access to open the document directly in Word or show it in File Explorer.
 - **Intelligent Draft Naming**: Automatically extracts the **Cover Page Title** from the New Report Template and appends `_Draft.docx` (e.g. `Commercial Real Estate PD Model Assessment Report_Draft.docx`).
 
 ---
@@ -25,13 +28,14 @@ Extract or copy the tool folder to your computer:
 WordAutomation/
 ├── gui_app.py
 ├── phase2_core.py
-├── run_tool.bat               <-- Double-click to launch!
+├── Launch_Tool.vbs             <-- Double-click for 100% silent launch (No CMD window)!
+├── run_tool.bat               <-- Batch launcher (auto-closes terminal upon UI start)
 └── USER_GUIDE.md
 ```
 
-### Step 2: Double-Click `run_tool.bat`
-- Verifies your Python installation and `pywin32`.
-- Launches the modern desktop application.
+### Step 2: Launch the Tool
+- **Recommended**: Double-click **`Launch_Tool.vbs`** — launches directly without any Command Prompt window or flash.
+- **Alternative**: Double-click **`run_tool.bat`** — checks the environment and immediately detaches into `pythonw.exe`, closing the black console window as soon as the GUI loads.
 
 ---
 
@@ -41,7 +45,7 @@ WordAutomation/
    - **Drag & drop** your blank template file into the left box, or click **Browse Template**.
    - Select your target report type using the segmented pill buttons:
      - `[ Assessment Report ]` — Standard model review report.
-     - `[ Affirmation Report ]` — Automatically prunes Section 2 ("Additional Analysis since prior review") and its subsections under Track Changes.
+     - `[ Affirmation Report ]` — Automatically prunes Section 2 ("Additional Analysis since prior review") and renumbers Section 3 to Section 2 under Track Changes.
 
 2. **Upload Reference Report (`.docx`)**
    - **Drag & drop** your finalized prior review report into the right box, or click **Browse Reference**.
@@ -69,7 +73,7 @@ WordAutomation/
 | **Section Matching** | Normalizes heading numbers (`1.2 Review Scope` → `review scope`) to match headings between template and reference. |
 | **Content Migration** | Migrates paragraphs, tables, and images under each matching heading into the template. |
 | **Instruction Cleanup** | Scans for Red + Italic text and deletes it as tracked changes (strikethrough). Normal black text and placeholder tables are preserved. |
-| **Affirmation Tailoring** | If Affirmation is selected, Section 2 ("Additional Analysis since prior review") and its subsections (2.1, 2.2, 2.3) are deleted under Track Changes. |
+| **Affirmation Tailoring** | If Affirmation is selected: <br>1. Section 2 ("Additional Analysis since prior review") and subsections (2.1, 2.2, 2.3) are deleted under Track Changes.<br>2. Section 3 ("3. Governance & Controls", "3.1 Model Controls", "3.2 Performance Monitoring & Reporting", "3.3 Evidence of Contingency Plan") is renumbered to Section 2 ("2.", "2.1", "2.2", "2.3") under Track Changes. |
 | **Template Protection** | Creates an isolated working copy before Word starts. Word never modifies the template. |
 
 ---

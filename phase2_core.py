@@ -388,11 +388,15 @@ def delete_red_italic_text(doc):
 
 def remove_affirmation_excluded_sections(template_doc):
     """
-    For Affirmation reports, eliminate Section 2 ('Additional Analysis since prior review'
-    and subsections 2.1, 2.2, 2.3).
-    With TrackRevisions ON, this deletion is recorded as tracked changes.
+    For Affirmation reports:
+      1. Eliminate Section 2 ('Additional Analysis since prior review' and subsections 2.1, 2.2, 2.3).
+      2. Renumber Section 3 ('3. Governance & Controls' and 3.1, 3.2, etc.) to Section 2 ('2.', '2.1', '2.2').
+    With TrackRevisions ON, deletions and renumbering appear as tracked revisions.
     """
     headings = build_section_map(template_doc)
+    deleted_sec2 = False
+
+    # Step 1: Delete Section 2
     for idx, h in enumerate(headings):
         if "additional analysis since prior review" in h["key"]:
             start_pos = h["heading_start"]
@@ -407,8 +411,46 @@ def remove_affirmation_excluded_sections(template_doc):
             print(f"\n  [AFFIRMATION] Removing Section 2 ('{h['text']}' and subsections) under Track Changes...")
             del_range = template_doc.Range(start_pos, end_pos)
             del_range.Delete()
-            return True
-    return False
+            deleted_sec2 = True
+            break
+
+    # Step 2: Renumber Section 3 -> Section 2 (3. -> 2., 3.1 -> 2.1, 3.2 -> 2.2)
+    print(f"\n  [AFFIRMATION] Renumbering Section 3 to Section 2 under Track Changes...")
+    para_count = template_doc.Paragraphs.Count
+    for i in range(1, para_count + 1):
+        try:
+            para = template_doc.Paragraphs.Item(i)
+            style_name = para.Style.NameLocal
+        except Exception:
+            continue
+
+        if style_name in HEADING_STYLE_NAMES:
+            text = para.Range.Text
+            # Look for leading "3." in heading
+            m = re.match(r'^(\s*)3\.', text)
+            if m:
+                leading_spaces = len(m.group(1))
+                num_start = para.Range.Start + leading_spaces
+                num_end = num_start + 2  # len of "3." is 2
+                num_range = template_doc.Range(num_start, num_end)
+                if num_range.Text == "3.":
+                    print(f"  [RENUMBER] '{text.strip()}' -> '2.{text.strip()[leading_spaces+2:]}'")
+                    num_range.Text = "2."
+                else:
+                    try:
+                        f = para.Range.Find
+                        f.ClearFormatting()
+                        f.Text = "3."
+                        f.Replacement.ClearFormatting()
+                        f.Replacement.Text = "2."
+                        f.Forward = True
+                        f.Wrap = 0  # wdFindStop
+                        f.Execute(Replace=1)  # wdReplaceOne
+                        print(f"  [RENUMBER via Find] '{text.strip()}'")
+                    except Exception as e:
+                        print(f"  [WARNING] Renumber failed for '{text.strip()}': {e}")
+
+    return deleted_sec2
 
 
 def extract_cover_title(doc, fallback_name="Report"):

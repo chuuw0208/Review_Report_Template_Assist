@@ -69,17 +69,21 @@ if %errorlevel% neq 0 (
 )
 echo.
 
-:: 3. Launch the desktop GUI
+:: 3. Launch Desktop GUI in background (closes this terminal window automatically)
 echo [INFO] Launching Desktop GUI Application...
-echo.
 
-%PYTHON_CMD% "%~dp0gui_app.py"
-
-if %errorlevel% neq 0 (
-    echo.
-    echo [ERROR] The application exited with an error code.
-    pause
+where pythonw >nul 2>nul
+if %errorlevel% equ 0 (
+    start "" pythonw "%~dp0gui_app.py"
+    exit /b 0
 )
 
+where pyw >nul 2>nul
+if %errorlevel% equ 0 (
+    start "" pyw "%~dp0gui_app.py"
+    exit /b 0
+)
+
+start "" "%PYTHON_CMD%" "%~dp0gui_app.py"
 exit /b 0
 

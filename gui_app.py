@@ -152,7 +152,7 @@ class ModernCompletionModal(tk.Toplevel):
         self.on_open_folder = on_open_folder
 
         self.title("Draft Generated")
-        self.geometry("540x350")
+        self.geometry("540x270")
         self.resizable(False, False)
         self.configure(bg="#ffffff")
 
@@ -167,7 +167,7 @@ class ModernCompletionModal(tk.Toplevel):
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
         mx = px + (pw - 540) // 2
-        my = py + (ph - 350) // 2
+        my = py + (ph - 270) // 2
         self.geometry(f"+{max(0, mx)}+{max(0, my)}")
 
         self._build_content()
@@ -180,27 +180,29 @@ class ModernCompletionModal(tk.Toplevel):
         container = tk.Frame(self, bg="#ffffff", padx=34, pady=28)
         container.pack(fill=tk.BOTH, expand=True)
 
-        # Success Checkmark Badge
+        # Header Row: Checkmark badge on left, Title on right (Req 2)
+        header_row = tk.Frame(container, bg="#ffffff")
+        header_row.pack(fill=tk.X, pady=(0, 8))
+
         icon_badge = tk.Label(
-            container,
+            header_row,
             text="✔",
-            font=("Segoe UI", 18, "bold"),
+            font=("Segoe UI", 13, "bold"),
             fg="#008450",
             bg="#e8f5ed",
-            width=3,
+            width=2,
             height=1
         )
-        icon_badge.pack(anchor="w", pady=(0, 10))
+        icon_badge.pack(side=tk.LEFT, padx=(0, 10))
 
-        # Title
         title = tk.Label(
-            container,
+            header_row,
             text="Draft Report Ready",
             font=("Segoe UI", 16, "bold"),
             fg="#0f172a",
             bg="#ffffff"
         )
-        title.pack(anchor="w")
+        title.pack(side=tk.LEFT)
 
         # Subtitle
         subtitle = tk.Label(
@@ -210,7 +212,7 @@ class ModernCompletionModal(tk.Toplevel):
             fg="#475569",
             bg="#ffffff"
         )
-        subtitle.pack(anchor="w", pady=(2, 16))
+        subtitle.pack(anchor="w", pady=(0, 16))
 
         # File Details Box
         filename = os.path.basename(self.output_path)
@@ -281,22 +283,7 @@ class ModernCompletionModal(tk.Toplevel):
             cursor="hand2",
             command=self._action_open_folder
         )
-        btn_folder.pack(side=tk.LEFT, padx=(0, 10))
-
-        btn_close = tk.Button(
-            btn_frame,
-            text="Done",
-            font=("Segoe UI", 9),
-            bg="#ffffff",
-            fg="#64748b",
-            relief="flat",
-            bd=0,
-            padx=12,
-            pady=8,
-            cursor="hand2",
-            command=self.destroy
-        )
-        btn_close.pack(side=tk.RIGHT)
+        btn_folder.pack(side=tk.LEFT)
 
     def _action_open_word(self):
         self.on_open_word()
@@ -630,15 +617,15 @@ class MRMAutomationApp(BaseWindow):
         self.btn_generate = tk.Button(
             action_row,
             text="Generate Draft Report",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 12, "bold"),
             bg=self.c_brand,
             fg="#ffffff",
             activebackground=self.c_brand_hover,
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
-            padx=28,
-            pady=9,
+            padx=32,
+            pady=15,
             cursor="hand2",
             command=self._start_pipeline
         )
@@ -646,7 +633,7 @@ class MRMAutomationApp(BaseWindow):
 
         # Determinate Progress Bar + Percentage display
         progress_wrapper = tk.Frame(action_row, bg=self.c_card)
-        progress_wrapper.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(20, 16))
+        progress_wrapper.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(24, 16), pady=4)
 
         progress_info_row = tk.Frame(progress_wrapper, bg=self.c_card)
         progress_info_row.pack(fill=tk.X, pady=(0, 4))
