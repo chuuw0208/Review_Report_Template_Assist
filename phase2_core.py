@@ -415,7 +415,7 @@ def remove_affirmation_excluded_sections(template_doc):
 # MAIN ORCHESTRATOR
 # ============================================================================
 
-def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment"):
+def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
     """
     Full pipeline:
       1. Create a clean working copy of template at output_path (template is untouched!)
@@ -428,6 +428,13 @@ def run_migration(template_path, reference_path, output_path=None, target_report
       8. If target is Affirmation, prune Section 2 under Track Changes
       9. Save output
     """
+    def report_progress(percent, text):
+        if progress_callback:
+            try:
+                progress_callback(percent, text)
+            except Exception:
+                pass
+
     template_path  = os.path.abspath(template_path)
     reference_path = os.path.abspath(reference_path)
     if output_path is None:
@@ -439,6 +446,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         raise FileNotFoundError(f"Template not found: {template_path}")
     if not os.path.isfile(reference_path):
         raise FileNotFoundError(f"Reference report not found: {reference_path}")
+
+    report_progress(10, "Creating working copy from template...")
 
     # Guard: Ensure output file is not locked by an existing open Word window
     if os.path.exists(output_path):
@@ -466,6 +475,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         print("  Phase 2 — Content Migration Pipeline")
         print("=" * 60)
 
+        report_progress(20, "Starting Word application in background...")
+
         # ---- Start Word ----
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
@@ -475,6 +486,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         # ---- Detect report type ----
         report_type = detect_report_type(reference_path)
         print(f"[INFO] Report type detected: {report_type}\n")
+
+        report_progress(35, "Opening documents and mapping sections...")
 
         # ---- Open documents ----
         reference_doc = word.Documents.Open(reference_path, ReadOnly=True)
@@ -499,9 +512,13 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         print(f"\n--- Matching sections ---")
         matched, _, _ = match_sections(tmpl_headings, ref_headings)
 
+        report_progress(60, f"Migrating {len(matched)} matched sections...")
+
         # ---- Migrate ----
         print(f"\n--- Migrating content (bottom -> top) ---")
         migrated = migrate_sections(template_doc, reference_doc, matched)
+
+        report_progress(80, "Scanning and deleting red-italic instructions...")
 
         # ---- Delete red-italic ----
         print(f"\n--- Deleting red-italic instruction text ---")
@@ -509,12 +526,17 @@ def run_migration(template_path, reference_path, output_path=None, target_report
 
         # ---- Target Report Type tailoring (Affirmation pruning) ----
         if str(target_report_type).strip().lower() == "affirmation":
+            report_progress(90, "Pruning Section 2 for Affirmation report...")
             print(f"\n--- Tailoring for Affirmation Report ---")
             remove_affirmation_excluded_sections(template_doc)
+
+        report_progress(95, "Saving output draft document...")
 
         # ---- Save ----
         template_doc.Save()
         print(f"\n[INFO] Saved output document: {output_path}")
+
+        report_progress(100, "Draft report generated successfully!")
 
         # ---- Summary ----
         print("\n" + "=" * 60)

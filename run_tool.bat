@@ -61,10 +61,10 @@ if %errorlevel% neq 0 (
 )
 echo [OK] pywin32 is ready.
 
-:: Optional Drag-and-Drop enhancement (tkinterdnd2)
+:: Optional Drag-and-Drop enhancement
 %PYTHON_CMD% -c "import tkinterdnd2" >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [INFO] Optional drag-and-drop package (tkinterdnd2) checking...
+    echo [INFO] Checking optional drag-and-drop support...
     %PYTHON_CMD% -m pip install tkinterdnd2 --quiet 2>nul
 )
 echo.
