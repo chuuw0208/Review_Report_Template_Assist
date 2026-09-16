@@ -3,24 +3,23 @@ MRMV Report Content Migration Tool — Desktop GUI
 Tailored for Citizens Bank Model Risk Management & Validation (MRMV).
 
 Features:
-  - Apple / Microsoft Teams clean minimalist design with Citizens Bank Green (#008450)
-  - Trademark-style right-aligned header for "Citizens Model Risk Management & Validation"
+  - Theme Green (#008450) Title: "MRMV Report Content Migration Tool"
+  - Minimalist, distraction-free modern interface (Apple / Microsoft Teams clean aesthetic)
   - Side-by-side (左右) upload layout for "New Report Template" and "Reference Report"
   - Native Windows OLE Drag & Drop (ctypes shell32.DragAcceptFiles) + TkinterDnD support
   - Apple-style Segmented Pill Toggle: Assessment vs Affirmation
   - Reference Report auto-detection badge
   - Real Determinate Progress Bar with percentage indicator
-  - Custom Apple-style Completion Modal dialog (replaces clunky system alert box)
-  - Automated background draft naming and one-click launch in MS Word
+  - Custom Apple-style Completion Modal dialog with direct launch in Word
+  - Auto-names output document using the Template's cover page title + "_Draft.docx"
 """
 
 import os
 import sys
-import queue
 import threading
 import subprocess
 import tkinter as tk
-from tkinter import ttk, filedialog, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 
 # Ensure local script directory is on sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,28 +48,6 @@ except Exception:
     BaseWindow = tk.Tk
     HAS_TKDND = False
     DND_FILES = None
-
-
-# ============================================================================
-# THREAD-SAFE STDOUT STREAM REDIRECTOR
-# ============================================================================
-
-class ThreadSafeLogStream:
-    """Intercepts stdout/stderr and feeds a thread-safe Queue for UI rendering."""
-    def __init__(self, log_queue, original_stream):
-        self.log_queue = log_queue
-        self.original_stream = original_stream
-
-    def write(self, text):
-        if text:
-            self.log_queue.put(text)
-        if self.original_stream:
-            self.original_stream.write(text)
-            self.original_stream.flush()
-
-    def flush(self):
-        if self.original_stream:
-            self.original_stream.flush()
 
 
 # ============================================================================
@@ -119,7 +96,7 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
 
         WNDPROC = ctypes.WINFUNCTYPE(wintypes.LPARAM, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
-        # Get the Win32 HWND for the Tkinter window
+        # Get Win32 HWND
         root.update_idletasks()
         try:
             hwnd = int(root.wm_frame(), 16)
@@ -132,7 +109,7 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
         # Tell Windows Explorer this window accepts dropped files
         shell32.DragAcceptFiles(hwnd, True)
 
-        # Hook window procedure to intercept WM_DROPFILES
+        # Subclass window procedure to intercept WM_DROPFILES
         old_wndproc = user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
 
         def custom_wndproc(h_wnd, msg, w_param, l_param):
@@ -162,11 +139,11 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
 
 
 # ============================================================================
-# MODERN MODAL DIALOG (APPLE / TEAMS STYLE SUCCESS MODAL)
+# MODERN COMPLETION MODAL DIALOG (APPLE / TEAMS STYLE)
 # ============================================================================
 
 class ModernCompletionModal(tk.Toplevel):
-    """Refined Apple/Teams style modal popup dialog for completion notification."""
+    """Refined Apple/Teams style modal dialog for completion notification."""
     def __init__(self, parent, target_type, output_path, on_open_word, on_open_folder):
         super().__init__(parent)
         self.target_type = target_type
@@ -174,8 +151,8 @@ class ModernCompletionModal(tk.Toplevel):
         self.on_open_word = on_open_word
         self.on_open_folder = on_open_folder
 
-        self.title("Report Generated")
-        self.geometry("520x340")
+        self.title("Draft Generated")
+        self.geometry("540x350")
         self.resizable(False, False)
         self.configure(bg="#ffffff")
 
@@ -189,21 +166,21 @@ class ModernCompletionModal(tk.Toplevel):
         ph = parent.winfo_height()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
-        mx = px + (pw - 520) // 2
-        my = py + (ph - 340) // 2
+        mx = px + (pw - 540) // 2
+        my = py + (ph - 350) // 2
         self.geometry(f"+{max(0, mx)}+{max(0, my)}")
 
         self._build_content()
 
-        # Key bindings
+        # Keyboard shortcuts
         self.bind("<Return>", lambda e: self._action_open_word())
         self.bind("<Escape>", lambda e: self.destroy())
 
     def _build_content(self):
-        container = tk.Frame(self, bg="#ffffff", padx=32, pady=28)
+        container = tk.Frame(self, bg="#ffffff", padx=34, pady=28)
         container.pack(fill=tk.BOTH, expand=True)
 
-        # Success Icon Badge
+        # Success Checkmark Badge
         icon_badge = tk.Label(
             container,
             text="✔",
@@ -228,14 +205,14 @@ class ModernCompletionModal(tk.Toplevel):
         # Subtitle
         subtitle = tk.Label(
             container,
-            text=f"Your {self.target_type} report has been successfully drafted with native Track Changes.",
+            text=f"Your {self.target_type} draft has been generated with native Track Changes.",
             font=("Segoe UI", 9),
             fg="#475569",
             bg="#ffffff"
         )
         subtitle.pack(anchor="w", pady=(2, 16))
 
-        # File Details Card
+        # File Details Box
         filename = os.path.basename(self.output_path)
         folder = os.path.dirname(self.output_path)
 
@@ -269,7 +246,7 @@ class ModernCompletionModal(tk.Toplevel):
         )
         lbl_path.pack(fill=tk.X, pady=(2, 0))
 
-        # Actions Frame
+        # Actions Row
         btn_frame = tk.Frame(container, bg="#ffffff")
         btn_frame.pack(fill=tk.X)
 
@@ -339,8 +316,8 @@ class MRMAutomationApp(BaseWindow):
         super().__init__()
 
         self.title("MRMV Report Content Migration Tool")
-        self.geometry("960x790")
-        self.minsize(880, 700)
+        self.geometry("940x530")
+        self.minsize(860, 480)
 
         # Citizens Bank Brand Palette
         self.c_brand = "#008450"          # Citizens Primary Green
@@ -362,7 +339,6 @@ class MRMAutomationApp(BaseWindow):
         self.configure(bg=self.c_canvas)
 
         # State variables
-        self.log_queue = queue.Queue()
         self.is_processing = False
         self.template_path = None
         self.reference_path = None
@@ -374,9 +350,6 @@ class MRMAutomationApp(BaseWindow):
 
         # Setup Native Windows Drag & Drop hook (ctypes) + TkinterDnD fallback
         self._init_drag_and_drop()
-
-        # Start log consumer loop
-        self.after(80, self._process_log_queue)
 
     def _configure_styles(self):
         style = ttk.Style(self)
@@ -397,36 +370,26 @@ class MRMAutomationApp(BaseWindow):
         )
 
     def _build_ui(self):
-        root_padding = tk.Frame(self, bg=self.c_canvas, padx=28, pady=22)
+        root_padding = tk.Frame(self, bg=self.c_canvas, padx=28, pady=24)
         root_padding.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------- 1. Top Header (Req 1) ----------------
+        # ---------------- 1. Top Header (Req 1 & Req 2) ----------------
         header_frame = tk.Frame(root_padding, bg=self.c_canvas)
-        header_frame.pack(fill=tk.X, pady=(0, 18))
+        header_frame.pack(fill=tk.X, pady=(0, 20))
 
-        # Title on Left
+        # Title in Theme Green (#008450) on Left (Right label deleted per Req 2)
         title_label = tk.Label(
             header_frame,
             text="MRMV Report Content Migration Tool",
             font=("Segoe UI", 18, "bold"),
-            fg=self.c_text_main,
+            fg=self.c_brand,
             bg=self.c_canvas
         )
         title_label.pack(side=tk.LEFT, anchor="w")
 
-        # Subdued Trademark Label on Right (No bullet, regular font, gray)
-        brand_label = tk.Label(
-            header_frame,
-            text="Citizens Model Risk Management & Validation",
-            font=("Segoe UI", 9),
-            fg="#94a3b8",
-            bg=self.c_canvas
-        )
-        brand_label.pack(side=tk.RIGHT, anchor="e", pady=(6, 0))
-
-        # ---------------- 2. Side-by-Side Upload Cards (左右排版, Req 2) ----------------
+        # ---------------- 2. Side-by-Side Upload Cards (左右排版) ----------------
         cards_container = tk.Frame(root_padding, bg=self.c_canvas)
-        cards_container.pack(fill=tk.X, pady=(0, 16))
+        cards_container.pack(fill=tk.X, pady=(0, 18))
         cards_container.columnconfigure(0, weight=1, uniform="group1")
         cards_container.columnconfigure(1, weight=1, uniform="group1")
 
@@ -650,16 +613,16 @@ class MRMAutomationApp(BaseWindow):
         )
         self.badge_ref_type.pack(fill=tk.X)
 
-        # ---------------- 3. Central Action & Progress Card (Req 5) ----------------
+        # ---------------- 3. Central Action & Progress Card ----------------
         action_card = tk.Frame(
             root_padding,
             bg=self.c_card,
             highlightbackground=self.c_border,
             highlightthickness=1,
             padx=18,
-            pady=14
+            pady=16
         )
-        action_card.pack(fill=tk.X, pady=(0, 14))
+        action_card.pack(fill=tk.X, pady=(0, 18))
 
         action_row = tk.Frame(action_card, bg=self.c_card)
         action_row.pack(fill=tk.X)
@@ -681,12 +644,12 @@ class MRMAutomationApp(BaseWindow):
         )
         self.btn_generate.pack(side=tk.LEFT)
 
-        # Determinate Progress Bar + Percentage display (Req 5)
+        # Determinate Progress Bar + Percentage display
         progress_wrapper = tk.Frame(action_row, bg=self.c_card)
-        progress_wrapper.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(18, 16))
+        progress_wrapper.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(20, 16))
 
         progress_info_row = tk.Frame(progress_wrapper, bg=self.c_card)
-        progress_info_row.pack(fill=tk.X, pady=(0, 3))
+        progress_info_row.pack(fill=tk.X, pady=(0, 4))
 
         self.lbl_status = tk.Label(
             progress_info_row,
@@ -715,55 +678,7 @@ class MRMAutomationApp(BaseWindow):
         )
         self.progress_bar.pack(fill=tk.X)
 
-        # ---------------- 4. Glass-Style Activity Log ----------------
-        log_card = tk.Frame(
-            root_padding,
-            bg="#111827",
-            highlightbackground="#1f2937",
-            highlightthickness=1,
-            padx=14,
-            pady=10
-        )
-        log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
-
-        log_top_bar = tk.Frame(log_card, bg="#111827")
-        log_top_bar.pack(fill=tk.X, pady=(0, 4))
-
-        lbl_log_title = tk.Label(
-            log_top_bar,
-            text="ACTIVITY & COMPLIANCE LOG",
-            font=("Consolas", 8, "bold"),
-            fg="#9ca3af",
-            bg="#111827"
-        )
-        lbl_log_title.pack(side=tk.LEFT)
-
-        btn_clear = tk.Label(
-            log_top_bar,
-            text="Clear",
-            font=("Segoe UI", 8),
-            fg="#9ca3af",
-            bg="#1f2937",
-            padx=8,
-            pady=2,
-            cursor="hand2"
-        )
-        btn_clear.pack(side=tk.RIGHT)
-        btn_clear.bind("<Button-1>", lambda e: self._clear_log())
-
-        self.txt_log = scrolledtext.ScrolledText(
-            log_card,
-            wrap=tk.WORD,
-            font=("Consolas", 9),
-            bg="#111827",
-            fg="#e5e7eb",
-            insertbackground="#ffffff",
-            relief="flat",
-            bd=0
-        )
-        self.txt_log.pack(fill=tk.BOTH, expand=True)
-
-        # ---------------- 5. Footer Quick Actions ----------------
+        # ---------------- 4. Footer Quick Actions ----------------
         footer = tk.Frame(root_padding, bg=self.c_canvas)
         footer.pack(fill=tk.X)
 
@@ -774,7 +689,7 @@ class MRMAutomationApp(BaseWindow):
             bg="#e2e8f0",
             fg=self.c_text_muted,
             padx=16,
-            pady=7
+            pady=8
         )
         self.btn_open_word.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -785,12 +700,12 @@ class MRMAutomationApp(BaseWindow):
             bg="#e2e8f0",
             fg=self.c_text_muted,
             padx=16,
-            pady=7
+            pady=8
         )
         self.btn_open_folder.pack(side=tk.LEFT)
 
     # ========================================================================
-    # INTERACTION & DRAG-AND-DROP SETUP (Req 3)
+    # INTERACTION & DRAG-AND-DROP SETUP
     # ========================================================================
 
     def _bind_dropzone_events(self, dropzone_widget, browse_command):
@@ -823,10 +738,8 @@ class MRMAutomationApp(BaseWindow):
         1. Pure Win32 ctypes hook (DragAcceptFiles) for native Windows Explorer file dragging.
         2. TkinterDnD registration if library is installed.
         """
-        # Try native Win32 ctypes hook first (offline, no pip needed)
-        success = setup_native_win32_drag_and_drop(self, self._on_native_win32_drop)
+        setup_native_win32_drag_and_drop(self, self._on_native_win32_drop)
 
-        # Also register with TkinterDnD if present
         if HAS_TKDND:
             try:
                 self.template_dropzone.drop_target_register(DND_FILES)
@@ -844,7 +757,6 @@ class MRMAutomationApp(BaseWindow):
 
         file_path = files[0]
         if not file_path.lower().endswith(".docx"):
-            self._append_log("[WARNING] Dropped file is not a .docx document.\n")
             return
 
         # Determine if dropped on left half (Template) or right half (Reference)
@@ -873,7 +785,7 @@ class MRMAutomationApp(BaseWindow):
             self._set_reference_file(path)
 
     # ========================================================================
-    # FILE SELECTION & STATE UPDATES (Req 4: removed duplicate "Click to change")
+    # FILE SELECTION & STATE UPDATES
     # ========================================================================
 
     def _browse_template(self):
@@ -889,13 +801,10 @@ class MRMAutomationApp(BaseWindow):
         basename = os.path.basename(self.template_path)
         size_kb = os.path.getsize(self.template_path) // 1024
 
-        # Update Dropzone appearance (Req 4: only show size, no duplicate "Click to change")
         self.lbl_tmpl_icon.config(text="✔", fg=self.c_brand)
         self.lbl_tmpl_main.config(text=basename[:30] + ("..." if len(basename) > 30 else ""))
         self.lbl_tmpl_sub.config(text=f"{size_kb} KB")
         self.btn_tmpl_browse.config(text="Change File", bg="#d1fae5", fg=self.c_brand)
-
-        self._append_log(f"[INFO] Template selected: {basename}\n")
 
     def _browse_reference(self):
         path = filedialog.askopenfilename(
@@ -910,7 +819,6 @@ class MRMAutomationApp(BaseWindow):
         basename = os.path.basename(self.reference_path)
         size_kb = os.path.getsize(self.reference_path) // 1024
 
-        # Update Dropzone appearance (Req 4: only show size, no duplicate "Click to change")
         self.lbl_ref_icon.config(text="✔", fg="#0284c7")
         self.lbl_ref_main.config(text=basename[:30] + ("..." if len(basename) > 30 else ""))
         self.lbl_ref_sub.config(text=f"{size_kb} KB")
@@ -938,7 +846,6 @@ class MRMAutomationApp(BaseWindow):
                 fg=self.c_brand,
                 font=("Segoe UI", 9, "bold")
             )
-            self._append_log(f"[INFO] Reference selected: {basename} (Type: {detected})\n")
         else:
             self.badge_ref_type.config(
                 text="Detected: ⚠ Unspecified (keyword not in filename)",
@@ -946,7 +853,6 @@ class MRMAutomationApp(BaseWindow):
                 fg="#b45309",
                 font=("Segoe UI", 9)
             )
-            self._append_log(f"[INFO] Reference selected: {basename}\n")
 
     def _select_report_type(self, rtype):
         """Toggle segmented pills for Assessment vs Affirmation."""
@@ -958,10 +864,8 @@ class MRMAutomationApp(BaseWindow):
             self.btn_pill_affirmation.config(bg=self.c_brand, fg="#ffffff")
             self.btn_pill_assessment.config(bg="#ffffff", fg=self.c_text_sub)
 
-        self._append_log(f"[CONFIG] Target report type set to: {rtype}\n")
-
     # ========================================================================
-    # PIPELINE EXECUTION & PROGRESS UPDATES (Req 5: Determinate Progress Bar)
+    # PIPELINE EXECUTION & PROGRESS UPDATES
     # ========================================================================
 
     def _update_progress(self, percent, status_text):
@@ -977,21 +881,12 @@ class MRMAutomationApp(BaseWindow):
             return
 
         if not self.template_path or not os.path.isfile(self.template_path):
-            self._append_log("[WARNING] Please select or drop a New Report Template.\n")
+            messagebox.showwarning("Missing Template", "Please select or drop a New Report Template (.docx).")
             return
 
         if not self.reference_path or not os.path.isfile(self.reference_path):
-            self._append_log("[WARNING] Please select or drop a Reference Report.\n")
+            messagebox.showwarning("Missing Reference", "Please select or drop a Reference Report (.docx).")
             return
-
-        # Derive clean draft output path automatically in template folder
-        tmpl_dir = os.path.dirname(self.template_path)
-        tmpl_base, tmpl_ext = os.path.splitext(os.path.basename(self.template_path))
-        target_suffix = f"_{self.target_report_type}_Draft"
-        output_path = os.path.join(tmpl_dir, f"{tmpl_base}{target_suffix}{tmpl_ext}")
-
-        if os.path.abspath(self.template_path) == os.path.abspath(output_path):
-            output_path = os.path.join(tmpl_dir, f"{tmpl_base}_Draft_Output{tmpl_ext}")
 
         self.is_processing = True
         self.btn_generate.config(state=tk.DISABLED, bg="#94a3b8", cursor="arrow")
@@ -1000,47 +895,40 @@ class MRMAutomationApp(BaseWindow):
         # Reset determinate progress bar
         self.progress_bar['value'] = 0
         self.lbl_progress_percent.config(text="0%")
-        self.lbl_status.config(text="Starting background migration...")
-        self._append_log("\n" + "=" * 60 + f"\n[START] Generating {self.target_report_type} Draft Report...\n" + "=" * 60 + "\n")
+        self.lbl_status.config(text="Starting migration pipeline...")
 
-        # Launch worker thread
+        # Launch worker thread (pass output_path=None to auto-derive from cover page title!)
         worker = threading.Thread(
             target=self._run_worker,
-            args=(self.template_path, self.reference_path, output_path, self.target_report_type),
+            args=(self.template_path, self.reference_path, self.target_report_type),
             daemon=True
         )
         worker.start()
 
-    def _run_worker(self, template_path, reference_path, output_path, target_type):
-        """Worker thread running Word COM automation with stdout redirected."""
-        orig_stdout = sys.stdout
-        orig_stderr = sys.stderr
-
-        sys.stdout = ThreadSafeLogStream(self.log_queue, orig_stdout)
-        sys.stderr = ThreadSafeLogStream(self.log_queue, orig_stderr)
-
+    def _run_worker(self, template_path, reference_path, target_type):
+        """Worker thread executing Word COM automation in the background."""
         success = False
         error_msg = None
+        result_output_path = None
 
         try:
             if run_migration is None:
                 raise RuntimeError("Migration core engine (phase2_core) could not be loaded.")
 
-            run_migration(
+            # output_path=None tells run_migration to extract cover title and auto-name!
+            result_output_path = run_migration(
                 template_path=template_path,
                 reference_path=reference_path,
-                output_path=output_path,
+                output_path=None,
                 target_report_type=target_type,
                 progress_callback=self._update_progress
             )
             success = True
-            self.generated_output_path = output_path
+            self.generated_output_path = result_output_path
         except Exception as exc:
             error_msg = str(exc)
         finally:
-            sys.stdout = orig_stdout
-            sys.stderr = orig_stderr
-            self.after(0, self._on_pipeline_completed, success, error_msg, output_path)
+            self.after(0, self._on_pipeline_completed, success, error_msg, result_output_path)
 
     def _on_pipeline_completed(self, success, error_msg, output_path):
         """Called on main UI thread once migration worker finishes."""
@@ -1053,7 +941,7 @@ class MRMAutomationApp(BaseWindow):
             self.lbl_status.config(text="✔  Draft Report Generated Successfully!")
             self._enable_footer_buttons()
 
-            # Present modern Apple-style modal dialog (Req 6)
+            # Present modern Apple-style modal dialog
             ModernCompletionModal(
                 parent=self,
                 target_type=self.target_report_type,
@@ -1063,27 +951,11 @@ class MRMAutomationApp(BaseWindow):
             )
         else:
             self.lbl_status.config(text="✖  Process Failed")
-            self._append_log(f"\n[ERROR] Pipeline failed: {error_msg}\n")
+            messagebox.showerror("Migration Error", f"An error occurred during report migration:\n\n{error_msg}")
 
     # ========================================================================
-    # LOGGING & QUICK ACTIONS
+    # QUICK ACTIONS
     # ========================================================================
-
-    def _process_log_queue(self):
-        while not self.log_queue.empty():
-            try:
-                msg = self.log_queue.get_nowait()
-                self._append_log(msg)
-            except queue.Empty:
-                break
-        self.after(80, self._process_log_queue)
-
-    def _append_log(self, text):
-        self.txt_log.insert(tk.END, text)
-        self.txt_log.see(tk.END)
-
-    def _clear_log(self):
-        self.txt_log.delete("1.0", tk.END)
 
     def _enable_footer_buttons(self):
         self.btn_open_word.config(
@@ -1116,7 +988,7 @@ class MRMAutomationApp(BaseWindow):
                 # macOS / Linux fallback
                 subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", self.generated_output_path])
             except Exception as exc:
-                self._append_log(f"[ERROR] Failed to launch Word: {exc}\n")
+                messagebox.showerror("Error", f"Failed to launch document:\n{exc}")
 
     def _open_folder(self):
         if self.generated_output_path and os.path.exists(self.generated_output_path):
@@ -1127,7 +999,7 @@ class MRMAutomationApp(BaseWindow):
                 else:
                     subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", folder])
             except Exception as exc:
-                self._append_log(f"[ERROR] Failed to open folder: {exc}\n")
+                messagebox.showerror("Error", f"Failed to open folder:\n{exc}")
 
 
 # ============================================================================

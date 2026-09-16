@@ -411,6 +411,74 @@ def remove_affirmation_excluded_sections(template_doc):
     return False
 
 
+def extract_cover_title(doc, fallback_name="Report"):
+    """
+    Extract the title from the cover page (title page) of the document.
+    Scans paragraphs prior to the first heading (Heading 1/2/3).
+    Selects prominent title text (styled as 'Title' or bold/large text).
+    Sanitizes the extracted string for a valid Windows filename.
+    """
+    title_candidates = []
+    para_count = doc.Paragraphs.Count
+
+    for i in range(1, min(para_count + 1, 25)):
+        try:
+            para = doc.Paragraphs.Item(i)
+            style_name = para.Style.NameLocal
+        except Exception:
+            continue
+
+        # Stop scanning when we hit the first standard heading (e.g. "1. Review Details")
+        if style_name in HEADING_STYLE_NAMES:
+            break
+
+        text = para.Range.Text.strip("\r\n\t\x07 ")
+        if not text:
+            continue
+
+        # Check if styled as 'Title'
+        if "title" in style_name.lower() and "subtitle" not in style_name.lower():
+            title_candidates.append(text)
+            break
+
+        # Check if paragraph has bold font or prominent size (>= 14pt)
+        font = para.Range.Font
+        try:
+            is_bold = (font.Bold in (True, -1))
+            size = font.Size
+        except Exception:
+            is_bold = False
+            size = 11
+
+        lower_t = text.lower()
+        if any(prefix in lower_t for prefix in ["version", "ver.", "date:", "author:", "prepared by:", "model id:"]):
+            continue
+
+        if is_bold or (size and size >= 14):
+            title_candidates.append(text)
+
+    if title_candidates:
+        raw_title = " ".join(title_candidates)
+    else:
+        try:
+            prop_title = doc.BuiltInDocumentProperties("Title").Value.strip()
+            if prop_title and len(prop_title) > 2:
+                raw_title = prop_title
+            else:
+                raw_title = fallback_name
+        except Exception:
+            raw_title = fallback_name
+
+    # Sanitize for valid Windows filename: remove < > : " / \ | ? *
+    clean_title = re.sub(r'[\\/*?:"<>|\r\n\t]+', ' ', raw_title)
+    clean_title = " ".join(clean_title.split()).strip()
+
+    if len(clean_title) > 80:
+        clean_title = clean_title[:80].strip()
+
+    return clean_title if clean_title else fallback_name
+
+
 # ============================================================================
 # MAIN ORCHESTRATOR
 # ============================================================================
@@ -418,15 +486,16 @@ def remove_affirmation_excluded_sections(template_doc):
 def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
     """
     Full pipeline:
-      1. Create a clean working copy of template at output_path (template is untouched!)
-      2. Open both documents in Word (Word invisible)
-      3. Detect report type from reference filename
-      4. Build section maps
-      5. Match sections
+      1. Open Word (invisible)
+      2. If output_path is None, extract cover page title from template and name output as:
+         <Cover Page Title>_Draft.docx
+      3. Create clean working copy of template at output_path (template is untouched!)
+      4. Detect report type from reference filename
+      5. Build section maps & match sections
       6. Migrate matched content (tracked)
       7. Delete red-italic instruction text (tracked)
       8. If target is Affirmation, prune Section 2 under Track Changes
-      9. Save output
+      9. Save output and return output_path
     """
     def report_progress(percent, text):
         if progress_callback:
@@ -437,32 +506,11 @@ def run_migration(template_path, reference_path, output_path=None, target_report
 
     template_path  = os.path.abspath(template_path)
     reference_path = os.path.abspath(reference_path)
-    if output_path is None:
-        base, ext = os.path.splitext(template_path)
-        output_path = base + "_draft_output" + ext
-    output_path = os.path.abspath(output_path)
 
     if not os.path.isfile(template_path):
         raise FileNotFoundError(f"Template not found: {template_path}")
     if not os.path.isfile(reference_path):
         raise FileNotFoundError(f"Reference report not found: {reference_path}")
-
-    report_progress(10, "Creating working copy from template...")
-
-    # Guard: Ensure output file is not locked by an existing open Word window
-    if os.path.exists(output_path):
-        try:
-            os.remove(output_path)
-        except PermissionError:
-            raise RuntimeError(
-                f"Cannot write to '{os.path.basename(output_path)}'. "
-                f"Please close the document in Word and run the script again."
-            )
-
-    # Copy template to output_path at the OS level BEFORE touching Word.
-    # This guarantees the original template is NEVER opened, locked, or modified by Word!
-    print(f"[INFO] Creating clean working copy from template -> {os.path.basename(output_path)}")
-    shutil.copy2(template_path, output_path)
 
     word = None
     template_doc = None
@@ -475,13 +523,44 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         print("  Phase 2 — Content Migration Pipeline")
         print("=" * 60)
 
-        report_progress(20, "Starting Word application in background...")
+        report_progress(10, "Starting Word application...")
 
         # ---- Start Word ----
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
         word.DisplayAlerts = False
         print("[INFO] Word started (invisible).")
+
+        # ---- Determine output_path from cover page title if None ----
+        if output_path is None:
+            report_progress(15, "Detecting cover page title from template...")
+            temp_tmpl = word.Documents.Open(template_path, ReadOnly=True)
+            tmpl_dir = os.path.dirname(template_path)
+            tmpl_base, ext = os.path.splitext(os.path.basename(template_path))
+            cover_title = extract_cover_title(temp_tmpl, fallback_name=tmpl_base)
+            temp_tmpl.Close(SaveChanges=WD_DO_NOT_SAVE)
+            temp_tmpl = None
+
+            output_filename = f"{cover_title}_Draft{ext}"
+            output_path = os.path.join(tmpl_dir, output_filename)
+            print(f"[INFO] Cover page title: \"{cover_title}\" -> Draft filename: \"{output_filename}\"")
+        else:
+            output_path = os.path.abspath(output_path)
+
+        report_progress(20, f"Creating working copy -> {os.path.basename(output_path)}...")
+
+        # Guard: Ensure output file is not locked by an existing open Word window
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except PermissionError:
+                raise RuntimeError(
+                    f"Cannot write to '{os.path.basename(output_path)}'. "
+                    f"Please close the document in Word and run the script again."
+                )
+
+        # Copy template to output_path at the OS level BEFORE opening for modification
+        shutil.copy2(template_path, output_path)
 
         # ---- Detect report type ----
         report_type = detect_report_type(reference_path)
@@ -493,7 +572,7 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         reference_doc = word.Documents.Open(reference_path, ReadOnly=True)
         print(f"[INFO] Opened reference (read-only): {os.path.basename(reference_path)}")
 
-        # Open the working copy at output_path. Original template_path is NEVER opened.
+        # Open working copy at output_path. Original template_path is NEVER opened for writing.
         template_doc = word.Documents.Open(output_path)
         print(f"[INFO] Opened working copy:          {os.path.basename(output_path)}")
 
@@ -548,6 +627,7 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         print(f"  Output file      : {os.path.basename(output_path)}")
         print("=" * 60)
         print("\nOpen the output in Word → Review → All Markup to verify.\n")
+        return output_path
 
     except Exception as exc:
         print(f"\n[ERROR] Pipeline failed: {exc}", file=sys.stderr)

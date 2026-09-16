@@ -7,13 +7,13 @@ This desktop application automates drafting Model Risk Management review reports
 
 ## 🎨 Design & Experience Highlights
 
-- **Citizens Bank Green Theme**: Branded with Citizens Bank's hallmark green (`#008450`) and soft mint accents (`#e8f5ed`).
-- **Apple / Microsoft Teams Modern Aesthetic**: Minimalist, clean card containers with generous spacing, refined typography, and glass-feel activity log.
+- **Citizens Bank Green Theme**: Branded with Citizens Bank's hallmark green (`#008450`).
+- **Clean Minimalist Architecture**: Pure Apple/Teams card layout without terminal/log clutter.
 - **Side-by-Side (左右排版) Layout**:
   - **Left Dropzone**: New Report Template + Target Report Type pill toggle (**Assessment** vs. **Affirmation**).
-  - **Right Dropzone**: Reference Report with real-time classification auto-detection.
+  - **Right Dropzone**: Reference Report with real-time classification auto-detection badge.
 - **Dual Upload Support**: Drag and drop `.docx` files directly from File Explorer, or click anywhere on the dropzone to browse.
-- **Automated Output Management**: Automatically names and saves the draft report in the template's folder (e.g. `Template_Assessment_Draft.docx` or `Template_Affirmation_Draft.docx`).
+- **Intelligent Draft Naming**: Automatically extracts the **Cover Page Title** from the New Report Template and appends `_Draft.docx` (e.g. `Commercial Real Estate PD Model Assessment Report_Draft.docx`).
 
 ---
 
@@ -30,8 +30,7 @@ WordAutomation/
 ```
 
 ### Step 2: Double-Click `run_tool.bat`
-- Verifies your Python installation.
-- Automatically verifies and sets up `pywin32` (and optional `tkinterdnd2` for drag-and-drop).
+- Verifies your Python installation and `pywin32`.
 - Launches the modern desktop application.
 
 ---
@@ -41,22 +40,23 @@ WordAutomation/
 1. **Upload New Report Template (`.docx`)**
    - **Drag & drop** your blank template file into the left box, or click **Browse Template**.
    - Select your target report type using the segmented pill buttons:
-     - `[ Assessment Report ]` — Keeps all standard sections including Section 2 ("Additional Analysis since prior review").
-     - `[ Affirmation Report ]` — Automatically prunes Section 2 and its subsections under Track Changes.
+     - `[ Assessment Report ]` — Standard model review report.
+     - `[ Affirmation Report ]` — Automatically prunes Section 2 ("Additional Analysis since prior review") and its subsections under Track Changes.
 
 2. **Upload Reference Report (`.docx`)**
    - **Drag & drop** your finalized prior review report into the right box, or click **Browse Reference**.
-   - The badge instantly detects the report classification:  
+   - The badge automatically detects the report classification:  
      `Detected: ✔ Assessment Report` (or `Affirmation` / `Validation`).
 
 3. **Click "Generate Draft Report"**
-   - Word runs securely in the background.
-   - The activity console displays live updates as sections are mapped, text/tables are migrated, and red-italic instructions are cleaned up.
+   - Word executes safely in the background.
+   - The green progress bar smoothly advances from 0% to 100% while status text informs you of each stage.
    - **Your original template is 100% untouched and preserved.**
 
 4. **Review & Open**
-   - Click **"📄 Open Draft Document in Word"** to review the draft with Track Changes enabled.
-   - Click **"📁 Open Containing Folder"** to jump straight to the output file in Windows File Explorer.
+   - A success card pops up displaying the detected draft filename and destination.
+   - Click **"📄 Open in Word"** to immediately review the draft with Track Changes visible.
+   - Click **"📁 View in Folder"** to locate the output file in Windows File Explorer.
 
 ---
 
@@ -64,6 +64,7 @@ WordAutomation/
 
 | Feature | Behavior |
 |---|---|
+| **Cover Title Naming** | Automatically extracts the title on the cover page of the template, sanitizes it, and appends `_Draft.docx`. |
 | **Report Auto-Detection** | Detects reference report type (`Assessment`, `Affirmation`, `Validation`) from the file name. |
 | **Section Matching** | Normalizes heading numbers (`1.2 Review Scope` → `review scope`) to match headings between template and reference. |
 | **Content Migration** | Migrates paragraphs, tables, and images under each matching heading into the template. |
@@ -78,6 +79,6 @@ WordAutomation/
 | Issue | Cause | Solution |
 |---|---|---|
 | *"Cannot write to '...docx'. Please close the document in Word."* | Output draft file is currently open in Word. | Close the Word window and click **Generate Draft Report** again. |
-| Drag & drop doesn't register | IT environment blocked `tkinterdnd2`. | Simply click anywhere on the upload box to browse and select the file. |
+| Drag & drop doesn't register | IT environment blocked `tkinterdnd2`. | Built-in Win32 ctypes hook handles native drops, or simply click anywhere on the box to browse. |
 | *"Python was not found on this computer"* | Python is not installed or not in PATH. | Request Python 3.8+ from bank IT. |
 | Ghost `WINWORD.EXE` process | Previous manual Word crash left background process. | Press `Ctrl + Shift + Esc` (Task Manager), find `Microsoft Word`, and select **End Task**. |
