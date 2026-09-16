@@ -22,8 +22,13 @@ import re
 import time
 import shutil
 import argparse
-import win32com.client
-import pythoncom
+
+try:
+    import win32com.client
+    import pythoncom
+except ImportError:
+    win32com = None
+    pythoncom = None
 
 
 # ============================================================================
@@ -381,11 +386,36 @@ def delete_red_italic_text(doc):
     return delete_count
 
 
+def remove_affirmation_excluded_sections(template_doc):
+    """
+    For Affirmation reports, eliminate Section 2 ('Additional Analysis since prior review'
+    and subsections 2.1, 2.2, 2.3).
+    With TrackRevisions ON, this deletion is recorded as tracked changes.
+    """
+    headings = build_section_map(template_doc)
+    for idx, h in enumerate(headings):
+        if "additional analysis since prior review" in h["key"]:
+            start_pos = h["heading_start"]
+            end_pos = h["body_end"]
+            for next_h in headings[idx + 1:]:
+                if next_h["level"] == 1:
+                    end_pos = next_h["heading_start"]
+                    break
+                else:
+                    end_pos = next_h["body_end"]
+
+            print(f"\n  [AFFIRMATION] Removing Section 2 ('{h['text']}' and subsections) under Track Changes...")
+            del_range = template_doc.Range(start_pos, end_pos)
+            del_range.Delete()
+            return True
+    return False
+
+
 # ============================================================================
 # MAIN ORCHESTRATOR
 # ============================================================================
 
-def run_migration(template_path, reference_path, output_path=None):
+def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment"):
     """
     Full pipeline:
       1. Create a clean working copy of template at output_path (template is untouched!)
@@ -395,7 +425,8 @@ def run_migration(template_path, reference_path, output_path=None):
       5. Match sections
       6. Migrate matched content (tracked)
       7. Delete red-italic instruction text (tracked)
-      8. Save output
+      8. If target is Affirmation, prune Section 2 under Track Changes
+      9. Save output
     """
     template_path  = os.path.abspath(template_path)
     reference_path = os.path.abspath(reference_path)
@@ -475,6 +506,11 @@ def run_migration(template_path, reference_path, output_path=None):
         # ---- Delete red-italic ----
         print(f"\n--- Deleting red-italic instruction text ---")
         deleted = delete_red_italic_text(template_doc)
+
+        # ---- Target Report Type tailoring (Affirmation pruning) ----
+        if str(target_report_type).strip().lower() == "affirmation":
+            print(f"\n--- Tailoring for Affirmation Report ---")
+            remove_affirmation_excluded_sections(template_doc)
 
         # ---- Save ----
         template_doc.Save()

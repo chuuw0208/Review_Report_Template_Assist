@@ -1,63 +1,75 @@
-# Model Risk Management (MRM) — Word Report Drafting Tool
-### User & Deployment Guide
+# MRMV Report Content Migration Tool
+### User & Deployment Guide — Citizens Bank Model Risk Management & Validation
 
-This tool automates drafting Model Risk Management Word review reports (**Assessment**, **Affirmation**, **Validation**) by intelligently migrating section contents from a finalized Reference Report into a standardized New Template, recording all modifications as **native MS Word Tracked Changes**.
+This desktop application automates drafting Model Risk Management review reports (**Assessment** and **Affirmation**) by migrating section contents from a finalized Reference Report into a standardized New Template, recording all modifications as **native MS Word Tracked Changes**.
+
+---
+
+## 🎨 Design & Experience Highlights
+
+- **Citizens Bank Green Theme**: Branded with Citizens Bank's hallmark green (`#008450`) and soft mint accents (`#e8f5ed`).
+- **Apple / Microsoft Teams Modern Aesthetic**: Minimalist, clean card containers with generous spacing, refined typography, and glass-feel activity log.
+- **Side-by-Side (左右排版) Layout**:
+  - **Left Dropzone**: New Report Template + Target Report Type pill toggle (**Assessment** vs. **Affirmation**).
+  - **Right Dropzone**: Reference Report with real-time classification auto-detection.
+- **Dual Upload Support**: Drag and drop `.docx` files directly from File Explorer, or click anywhere on the dropzone to browse.
+- **Automated Output Management**: Automatically names and saves the draft report in the template's folder (e.g. `Template_Assessment_Draft.docx` or `Template_Affirmation_Draft.docx`).
 
 ---
 
 ## 🚀 Quick Start (For Validators & Colleagues)
 
 ### Step 1: Place the Folder on Your Machine
-Extract or copy this tool's folder to your bank computer (for example, in your `Documents` or project folder):
+Extract or copy the tool folder to your computer:
 ```
 WordAutomation/
 ├── gui_app.py
 ├── phase2_core.py
 ├── run_tool.bat               <-- Double-click to launch!
-└── ...
+└── USER_GUIDE.md
 ```
 
 ### Step 2: Double-Click `run_tool.bat`
-- Automatically checks for Python and the required `pywin32` library.
-- Automatically installs `pywin32` if needed.
-- Launches the graphical desktop window.
+- Verifies your Python installation.
+- Automatically verifies and sets up `pywin32` (and optional `tkinterdnd2` for drag-and-drop).
+- Launches the modern desktop application.
 
 ---
 
 ## 🖥 How to Use the Tool
 
-1. **Select New Report Template (`.docx`)**
-   - Click **Browse...** to select your blank or standardized bank report template.
-   - The tool automatically suggests an output draft filename (e.g. `Template_Draft.docx`).
+1. **Upload New Report Template (`.docx`)**
+   - **Drag & drop** your blank template file into the left box, or click **Browse Template**.
+   - Select your target report type using the segmented pill buttons:
+     - `[ Assessment Report ]` — Keeps all standard sections including Section 2 ("Additional Analysis since prior review").
+     - `[ Affirmation Report ]` — Automatically prunes Section 2 and its subsections under Track Changes.
 
-2. **Select Reference Report (`.docx`)**
-   - Click **Browse...** to select the prior finalized review report.
-   - The tool instantly inspects the filename and displays a green badge:  
-     `Detected Type: ✔ Assessment Report` (or `Affirmation` / `Validation`).
+2. **Upload Reference Report (`.docx`)**
+   - **Drag & drop** your finalized prior review report into the right box, or click **Browse Reference**.
+   - The badge instantly detects the report classification:  
+     `Detected: ✔ Assessment Report` (or `Affirmation` / `Validation`).
 
-3. **Click "▶ Generate Draft Report"**
-   - The tool runs MS Word in the background.
-   - You can watch the real-time log box as headings are mapped, content is migrated, and red-italic instructions are cleaned up.
-   - **Your original template is 100% protected and never modified.**
+3. **Click "Generate Draft Report"**
+   - Word runs securely in the background.
+   - The activity console displays live updates as sections are mapped, text/tables are migrated, and red-italic instructions are cleaned up.
+   - **Your original template is 100% untouched and preserved.**
 
-4. **Review the Results**
-   - Click **"📄 Open Draft Document in Word"** to open your new draft.
-   - In Word, make sure **Review → All Markup** is selected:
-     - **Pasted reference contents** appear as **underlined tracked insertions**.
-     - **Default red italic instructions** appear as **struck-through tracked deletions**.
-     - **Pre-populated template tables and text** remain **intact and preserved**.
+4. **Review & Open**
+   - Click **"📄 Open Draft Document in Word"** to review the draft with Track Changes enabled.
+   - Click **"📁 Open Containing Folder"** to jump straight to the output file in Windows File Explorer.
 
 ---
 
 ## ⚙ Core Automation Logic
 
-| Action | How It Works |
+| Feature | Behavior |
 |---|---|
-| **Report Detection** | Scans filename for keywords (`Assessment`, `Affirmation`, `Validation`). |
-| **Section Matching** | Normalizes heading numbers (e.g., `1.2 Review Scope` → `review scope`) to match headings between template and reference. |
-| **Content Migration** | Copies everything between matching headings (paragraphs, tables, images) and inserts it directly under the template heading (bottom-to-top order to prevent shift). |
-| **Instruction Cleanup** | Reverse-scans paragraphs and character runs for Red + Italic formatting, deleting them under Track Changes. |
-| **File Safety** | Duplicates the template to the output path at the OS level before Word starts. Word never modifies the template. |
+| **Report Auto-Detection** | Detects reference report type (`Assessment`, `Affirmation`, `Validation`) from the file name. |
+| **Section Matching** | Normalizes heading numbers (`1.2 Review Scope` → `review scope`) to match headings between template and reference. |
+| **Content Migration** | Migrates paragraphs, tables, and images under each matching heading into the template. |
+| **Instruction Cleanup** | Scans for Red + Italic text and deletes it as tracked changes (strikethrough). Normal black text and placeholder tables are preserved. |
+| **Affirmation Tailoring** | If Affirmation is selected, Section 2 ("Additional Analysis since prior review") and its subsections (2.1, 2.2, 2.3) are deleted under Track Changes. |
+| **Template Protection** | Creates an isolated working copy before Word starts. Word never modifies the template. |
 
 ---
 
@@ -65,8 +77,7 @@ WordAutomation/
 
 | Issue | Cause | Solution |
 |---|---|---|
-| *"Cannot write to '...docx'. Please close the document in Word."* | Output file is already open in MS Word Desktop. | Close the Word window and click **Generate Draft Report** again. |
-| *"Python was not found on this computer"* | Python is not installed or not in system PATH. | Request Python 3.8+ installation from bank IT. |
-| *"pip install pywin32 blocked by proxy"* | Bank firewall restricts internet package downloads. | Ask bank IT to install `pywin32` on your machine (`pip install pywin32 --user`). |
-| Ghost `WINWORD.EXE` process | Previous manual Word crash left background process running. | Press `Ctrl + Shift + Esc` (Task Manager), right-click `Microsoft Word` or `WINWORD.EXE`, and select **End Task**. |
-
+| *"Cannot write to '...docx'. Please close the document in Word."* | Output draft file is currently open in Word. | Close the Word window and click **Generate Draft Report** again. |
+| Drag & drop doesn't register | IT environment blocked `tkinterdnd2`. | Simply click anywhere on the upload box to browse and select the file. |
+| *"Python was not found on this computer"* | Python is not installed or not in PATH. | Request Python 3.8+ from bank IT. |
+| Ghost `WINWORD.EXE` process | Previous manual Word crash left background process. | Press `Ctrl + Shift + Esc` (Task Manager), find `Microsoft Word`, and select **End Task**. |

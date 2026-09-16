@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 
-title MRM Report Drafting Tool - Launcher
+title MRMV Report Content Migration Tool - Launcher
 
 echo =======================================================================
-echo          Model Risk Management - Report Drafting Tool
+echo          MRMV Report Content Migration Tool
 echo =======================================================================
 echo.
 
@@ -60,6 +60,13 @@ if %errorlevel% neq 0 (
     )
 )
 echo [OK] pywin32 is ready.
+
+:: Optional Drag-and-Drop enhancement (tkinterdnd2)
+%PYTHON_CMD% -c "import tkinterdnd2" >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [INFO] Optional drag-and-drop package (tkinterdnd2) checking...
+    %PYTHON_CMD% -m pip install tkinterdnd2 --quiet 2>nul
+)
 echo.
 
 :: 3. Launch the desktop GUI
