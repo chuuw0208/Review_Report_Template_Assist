@@ -22,8 +22,16 @@ Usage:
 import os
 import sys
 import time
-import win32com.client
-import pythoncom
+try:
+    import win32com.client
+    import pythoncom
+except ImportError:
+    win32com = None
+    pythoncom = None
+
+import zipfile
+import xml.etree.ElementTree as ET
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -313,6 +321,89 @@ def create_test_reference(word, output_path):
     print(f"[OK] Reference created: {output_path}")
 
 
+def create_test_docs_openxml(template_path, reference_path):
+    """Generate test docx fixtures purely using standard library OpenXML."""
+    CONTENT_TYPES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+</Types>"""
+
+    RELS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+    DOC_RELS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+</Relationships>"""
+
+    SETTINGS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+</w:settings>"""
+
+    STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style>
+</w:styles>"""
+
+    TEMPLATE_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Commercial Real Estate Valuation Model</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Model ID: MRMV-2026-004 | Date: September 2026</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>1. Executive Summary</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:i/><w:color w:val="FF0000"/></w:rPr><w:t>[Instruction: Provide a concise executive overview of the model findings here. (Delete when complete)]</w:t></w:r></w:p>
+    <w:p><w:r><w:t>[Template placeholder text for executive summary]</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>1.1 Review Scope</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:i/><w:color w:val="C00000"/></w:rPr><w:t>[Instruction: Detail the scope and depth of this review.]</w:t></w:r></w:p>
+    <w:p><w:r><w:t>[Placeholder scope details]</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>2. Additional Analysis since prior review</w:t></w:r></w:p>
+    <w:p><w:r><w:t>This section covers additional analysis performed since the last validation cycle.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>2.1 Benchmark Testing</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Benchmark testing was conducted using external peer data.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>3. Governance &amp; Controls</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>3.1 Model Controls</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Access to production weights is strictly monitored under IAM role-based controls.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>3.2 Performance Monitoring &amp; Reporting</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Monthly tracking triggers are submitted to the Model Risk Committee quarterly.</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+
+    REFERENCE_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>CRE Valuation Prior Review</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>1. Executive Summary</w:t></w:r></w:p>
+    <w:p><w:r><w:t>The Commercial Real Estate Valuation Model underwent rigorous assessment. Overall model performance remains within accepted risk tolerances across all tested regional portfolios.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>1.1 Review Scope</w:t></w:r></w:p>
+    <w:p><w:r><w:t>The evaluation scope encompassed historical loan-level loss datasets spanning 2018 through 2025, covering credit default transitions and commercial property collateral revaluations.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>3. Governance &amp; Controls</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>3.1 Model Controls</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Updated reference note: Production pipelines require multi-party cryptographic sign-off before weights can be loaded into the serving cluster.</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+
+    for target_path, doc_xml in [(template_path, TEMPLATE_XML), (reference_path, REFERENCE_XML)]:
+        with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", CONTENT_TYPES_XML.strip())
+            zf.writestr("_rels/.rels", RELS_XML.strip())
+            zf.writestr("word/_rels/document.xml.rels", DOC_RELS_XML.strip())
+            zf.writestr("word/settings.xml", SETTINGS_XML.strip())
+            zf.writestr("word/styles.xml", STYLES_XML.strip())
+            zf.writestr("word/document.xml", doc_xml.strip())
+        print(f"[OK] OpenXML Created: {target_path}")
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -321,37 +412,41 @@ def main():
     template_path  = os.path.join(SCRIPT_DIR, "test_template_assessment.docx")
     reference_path = os.path.join(SCRIPT_DIR, "test_reference_assessment.docx")
 
-    word = None
-    try:
-        pythoncom.CoInitialize()
-        word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = False
-        word.DisplayAlerts = False
-        print("[INFO] Word started.")
-
-        create_test_template(word, template_path)
-        create_test_reference(word, reference_path)
-
-        print("\n[DONE] Test documents ready.  Run phase2_run_test.py next.\n")
-
-    except Exception as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-    finally:
-        if word is not None:
-            try:
-                word.Quit()
-            except Exception:
-                pass
+    if sys.platform == "win32" and win32com is not None:
         word = None
-        pythoncom.CoUninitialize()
-        time.sleep(1)
-        print("[INFO] Word closed.")
+        try:
+            pythoncom.CoInitialize()
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = False
+            print("[INFO] Word started.")
+
+            create_test_template(word, template_path)
+            create_test_reference(word, reference_path)
+
+            print("\n[DONE] Test documents ready (Word COM).\n")
+            return
+        except Exception as exc:
+            print(f"[WARNING] Word COM failed ({exc}), falling back to OpenXML generator...")
+        finally:
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    # Cross-platform fallback (macOS / Linux / Windows without Word)
+    print("[INFO] Generating test documents via OpenXML...")
+    create_test_docs_openxml(template_path, reference_path)
+    print("\n[DONE] Test documents ready (OpenXML).\n")
 
 
 if __name__ == "__main__":
     main()
+
 

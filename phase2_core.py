@@ -22,6 +22,10 @@ import re
 import time
 import shutil
 import argparse
+import copy
+import zipfile
+import datetime
+import xml.etree.ElementTree as ET
 
 try:
     import win32com.client
@@ -29,6 +33,43 @@ try:
 except ImportError:
     win32com = None
     pythoncom = None
+
+# OpenXML Namespaces
+OPENXML_NS = {
+    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'm': 'http://schemas.openxmlformats.org/officeDocument/2006/math',
+    'v': 'urn:schemas-microsoft-com:vml',
+    'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+    'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
+}
+for _p, _u in OPENXML_NS.items():
+    ET.register_namespace(_p, _u)
+
+W_NS = OPENXML_NS['w']
+def _w_tag(name):
+    return f"{{{W_NS}}}{name}"
+
+_P_TAG = _w_tag("p")
+_R_TAG = _w_tag("r")
+_T_TAG = _w_tag("t")
+_PPR_TAG = _w_tag("pPr")
+_PSTYLE_TAG = _w_tag("pStyle")
+_RPR_TAG = _w_tag("rPr")
+_I_TAG = _w_tag("i")
+_B_TAG = _w_tag("b")
+_SZ_TAG = _w_tag("sz")
+_COLOR_TAG = _w_tag("color")
+_INS_TAG = _w_tag("ins")
+_DEL_TAG = _w_tag("del")
+_DELTEXT_TAG = _w_tag("delText")
+_BODY_TAG = _w_tag("body")
+_TBL_TAG = _w_tag("tbl")
+_SETTINGS_TAG = _w_tag("settings")
+_TRACK_REV_TAG = _w_tag("trackRevisions")
+
+REVISION_AUTHOR = "MRMV Validator"
+
 
 
 # ============================================================================
@@ -88,16 +129,14 @@ def detect_report_type(filepath):
     """
     Detect report type by looking for a keyword in the filename.
     Returns: "Assessment", "Affirmation", or "Validation".
-    Raises ValueError if no keyword is found.
+    Falls back to "Assessment" if no keyword is found.
     """
     basename = os.path.basename(filepath).lower()
     for rtype in REPORT_TYPES:
         if rtype.lower() in basename:
             return rtype
-    raise ValueError(
-        f"Cannot detect report type from filename '{os.path.basename(filepath)}'. "
-        f"Expected one of: {REPORT_TYPES}"
-    )
+    return "Assessment"
+
 
 
 # ============================================================================
@@ -522,22 +561,12 @@ def extract_cover_title(doc, fallback_name="Report"):
 
 
 # ============================================================================
-# MAIN ORCHESTRATOR
+# WINDOWS WORD COM ENGINE
 # ============================================================================
 
-def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+def run_migration_windows_com(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
     """
-    Full pipeline:
-      1. Open Word (invisible)
-      2. If output_path is None, extract cover page title from template and name output as:
-         <Cover Page Title>_Draft.docx
-      3. Create clean working copy of template at output_path (template is untouched!)
-      4. Detect report type from reference filename
-      5. Build section maps & match sections
-      6. Migrate matched content (tracked)
-      7. Delete red-italic instruction text (tracked)
-      8. If target is Affirmation, prune Section 2 under Track Changes
-      9. Save output and return output_path
+    Windows-native Word COM pipeline (uses installed MS Word application).
     """
     def report_progress(percent, text):
         if progress_callback:
@@ -562,7 +591,7 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         pythoncom.CoInitialize()
 
         print("=" * 60)
-        print("  Phase 2 — Content Migration Pipeline")
+        print("  Phase 2 — Content Migration Pipeline (Windows COM)")
         print("=" * 60)
 
         report_progress(10, "Starting Word application...")
@@ -675,7 +704,7 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         print(f"\n[ERROR] Pipeline failed: {exc}", file=sys.stderr)
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        raise exc
 
     finally:
         # ---- Graceful cleanup ----
@@ -694,9 +723,545 @@ def run_migration(template_path, reference_path, output_path=None, target_report
         reference_doc = None
         template_doc = None
         word = None
-        pythoncom.CoUninitialize()
+        if pythoncom is not None:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
         time.sleep(1)
         print("[INFO] Word closed.")
+
+
+# ============================================================================
+# CROSS-PLATFORM OPENXML ENGINE (MACOS / LINUX / ZERO DEPENDENCIES)
+# ============================================================================
+
+def _get_iso_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _is_red_hex(val):
+    if not val:
+        return False
+    val = val.strip().lower()
+    if val in ("red", "ff0000", "c00000", "ed1c24", "ee2726", "d00000"):
+        return True
+    if len(val) == 6:
+        try:
+            r = int(val[0:2], 16)
+            g = int(val[2:4], 16)
+            b = int(val[4:6], 16)
+            return (r > 140) and (g < 110) and (b < 110) and (r > g + 40)
+        except ValueError:
+            pass
+    return False
+
+def _is_italic_run(r_elem):
+    rPr = r_elem.find(_RPR_TAG)
+    if rPr is not None:
+        i_elem = rPr.find(_I_TAG)
+        if i_elem is not None:
+            val = i_elem.attrib.get(_w_tag("val"), "true").lower()
+            return val not in ("false", "0")
+    return False
+
+def _is_red_run(r_elem):
+    rPr = r_elem.find(_RPR_TAG)
+    if rPr is not None:
+        c_elem = rPr.find(_COLOR_TAG)
+        if c_elem is not None:
+            val = c_elem.attrib.get(_w_tag("val"), "")
+            return _is_red_hex(val)
+    return False
+
+def _get_elem_text(elem):
+    return "".join(elem.itertext()).strip()
+
+def get_heading_info_openxml(p_elem):
+    pPr = p_elem.find(_PPR_TAG)
+    if pPr is not None:
+        pStyle = pPr.find(_PSTYLE_TAG)
+        if pStyle is not None:
+            val = pStyle.attrib.get(_w_tag("val"), "").lower()
+            m = re.search(r'heading\s*([1-3])', val)
+            if m:
+                level = int(m.group(1))
+                text = _get_elem_text(p_elem)
+                return level, text
+        outline = pPr.find(_w_tag("outlineLvl"))
+        if outline is not None:
+            try:
+                lvl_val = int(outline.attrib.get(_w_tag("val"), "-1"))
+                if 0 <= lvl_val <= 2:
+                    return lvl_val + 1, _get_elem_text(p_elem)
+            except ValueError:
+                pass
+    return None, None
+
+def parse_docx_sections_openxml(body_elem):
+    children = list(body_elem)
+    sections = []
+    current_sec = None
+
+    for idx, child in enumerate(children):
+        if child.tag == _P_TAG:
+            lvl, text = get_heading_info_openxml(child)
+            if lvl is not None and text:
+                current_sec = {
+                    'level': lvl,
+                    'text': text,
+                    'key': normalize_heading(text),
+                    'heading_index': idx,
+                    'heading_element': child,
+                    'body_elements': []
+                }
+                sections.append(current_sec)
+                continue
+
+        if current_sec is not None:
+            current_sec['body_elements'].append(child)
+
+    return sections
+
+def wrap_in_tracked_ins_openxml(elem, rev_id_gen):
+    now_str = _get_iso_now()
+    if elem.tag == _P_TAG:
+        new_children = []
+        for child in list(elem):
+            if child.tag == _PPR_TAG:
+                rPr = child.find(_RPR_TAG)
+                if rPr is None:
+                    rPr = ET.SubElement(child, _RPR_TAG)
+                ins_pr = ET.SubElement(rPr, _INS_TAG)
+                ins_pr.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                ins_pr.attrib[_w_tag("author")] = REVISION_AUTHOR
+                ins_pr.attrib[_w_tag("date")] = now_str
+                rev_id_gen[0] += 1
+                new_children.append(child)
+            elif child.tag == _R_TAG:
+                ins = ET.Element(_INS_TAG)
+                ins.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                ins.attrib[_w_tag("author")] = REVISION_AUTHOR
+                ins.attrib[_w_tag("date")] = now_str
+                rev_id_gen[0] += 1
+                ins.append(child)
+                new_children.append(ins)
+            elif child.tag == _INS_TAG:
+                new_children.append(child)
+            else:
+                new_children.append(child)
+        elem[:] = new_children
+
+    elif elem.tag == _TBL_TAG:
+        for p in elem.iter(_P_TAG):
+            wrap_in_tracked_ins_openxml(p, rev_id_gen)
+
+def delete_element_tracked_openxml(elem, rev_id_gen):
+    now_str = _get_iso_now()
+    if elem.tag == _P_TAG:
+        pPr = elem.find(_PPR_TAG)
+        if pPr is not None:
+            rPr = pPr.find(_RPR_TAG)
+            if rPr is None:
+                rPr = ET.SubElement(pPr, _RPR_TAG)
+            del_pr = ET.SubElement(rPr, _DEL_TAG)
+            del_pr.attrib[_w_tag("id")] = str(rev_id_gen[0])
+            del_pr.attrib[_w_tag("author")] = REVISION_AUTHOR
+            del_pr.attrib[_w_tag("date")] = now_str
+            rev_id_gen[0] += 1
+
+        new_children = []
+        for child in list(elem):
+            if child.tag == _PPR_TAG:
+                new_children.append(child)
+            elif child.tag == _R_TAG:
+                del_elem = ET.Element(_DEL_TAG)
+                del_elem.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                del_elem.attrib[_w_tag("author")] = REVISION_AUTHOR
+                del_elem.attrib[_w_tag("date")] = now_str
+                rev_id_gen[0] += 1
+
+                del_r = ET.SubElement(del_elem, _R_TAG)
+                rPr = child.find(_RPR_TAG)
+                if rPr is not None:
+                    del_r.append(copy.deepcopy(rPr))
+                for t in child.findall(_T_TAG):
+                    del_t = ET.SubElement(del_r, _DELTEXT_TAG)
+                    del_t.text = t.text
+                    del_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+                new_children.append(del_elem)
+            elif child.tag == _DEL_TAG:
+                new_children.append(child)
+            else:
+                new_children.append(child)
+        elem[:] = new_children
+    elif elem.tag == _TBL_TAG:
+        for p in elem.iter(_P_TAG):
+            delete_element_tracked_openxml(p, rev_id_gen)
+
+def delete_red_italic_openxml(body_elem, rev_id_gen):
+    now_str = _get_iso_now()
+    deleted_count = 0
+
+    for p in body_elem.findall(_P_TAG):
+        runs = p.findall(_R_TAG)
+        if not runs:
+            continue
+
+        all_red_italic = True
+        has_text = False
+        for r in runs:
+            t = "".join(r.itertext()).strip()
+            if t:
+                has_text = True
+                if not (_is_italic_run(r) and _is_red_run(r)):
+                    all_red_italic = False
+                    break
+
+        if has_text and all_red_italic:
+            delete_element_tracked_openxml(p, rev_id_gen)
+            deleted_count += 1
+            continue
+
+        new_children = []
+        p_modified = False
+        for child in list(p):
+            if child.tag == _R_TAG and _is_italic_run(child) and _is_red_run(child):
+                del_elem = ET.Element(_DEL_TAG)
+                del_elem.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                del_elem.attrib[_w_tag("author")] = REVISION_AUTHOR
+                del_elem.attrib[_w_tag("date")] = now_str
+                rev_id_gen[0] += 1
+
+                del_r = ET.SubElement(del_elem, _R_TAG)
+                rPr = child.find(_RPR_TAG)
+                if rPr is not None:
+                    del_r.append(copy.deepcopy(rPr))
+                for t in child.findall(_T_TAG):
+                    del_t = ET.SubElement(del_r, _DELTEXT_TAG)
+                    del_t.text = t.text
+                    del_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+
+                new_children.append(del_elem)
+                deleted_count += 1
+                p_modified = True
+            else:
+                new_children.append(child)
+
+        if p_modified:
+            p[:] = new_children
+
+    return deleted_count
+
+def tailor_affirmation_openxml(body_elem, rev_id_gen):
+    now_str = _get_iso_now()
+    children = list(body_elem)
+
+    # 1. Delete Section 2 and all subsections
+    sec2_start_idx = None
+    sec2_end_idx = len(children)
+    for idx, child in enumerate(children):
+        if child.tag == _P_TAG:
+            lvl, text = get_heading_info_openxml(child)
+            if lvl == 1:
+                norm = normalize_heading(text)
+                if "additional analysis since prior review" in norm:
+                    sec2_start_idx = idx
+                elif sec2_start_idx is not None and idx > sec2_start_idx:
+                    sec2_end_idx = idx
+                    break
+
+    if sec2_start_idx is not None:
+        print(f"  [AFFIRMATION] Deleting Section 2 and all subsections (elements {sec2_start_idx} to {sec2_end_idx})...")
+        for i in range(sec2_start_idx, sec2_end_idx):
+            delete_element_tracked_openxml(children[i], rev_id_gen)
+
+    # 2. Renumber Section 3 -> Section 2
+    renum_count = 0
+    for child in children:
+        if child.tag == _P_TAG:
+            lvl, text = get_heading_info_openxml(child)
+            if lvl is not None and text:
+                m = re.match(r'^(\s*)(3)(\.|\.\d+)', text)
+                if m:
+                    for r in child.findall(_R_TAG):
+                        for t in r.findall(_T_TAG):
+                            if t.text and re.match(r'^(\s*)3(\.|\.\d+)', t.text):
+                                old_str = t.text
+                                m_run = re.match(r'^(\s*)(3)(\.|\.\d+)(.*)', old_str)
+                                if m_run:
+                                    leading = m_run.group(1)
+                                    num_tail = m_run.group(3)
+                                    rest = m_run.group(4)
+
+                                    old_num = f"{leading}3{num_tail}"
+                                    new_num = f"{leading}2{num_tail}"
+
+                                    r_idx = list(child).index(r)
+                                    child.remove(r)
+
+                                    # Tracked del old
+                                    del_e = ET.Element(_DEL_TAG)
+                                    del_e.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                                    del_e.attrib[_w_tag("author")] = REVISION_AUTHOR
+                                    del_e.attrib[_w_tag("date")] = now_str
+                                    rev_id_gen[0] += 1
+                                    del_r = ET.SubElement(del_e, _R_TAG)
+                                    del_t = ET.SubElement(del_r, _DELTEXT_TAG)
+                                    del_t.text = old_num
+                                    del_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+
+                                    # Tracked ins new
+                                    ins_e = ET.Element(_INS_TAG)
+                                    ins_e.attrib[_w_tag("id")] = str(rev_id_gen[0])
+                                    ins_e.attrib[_w_tag("author")] = REVISION_AUTHOR
+                                    ins_e.attrib[_w_tag("date")] = now_str
+                                    rev_id_gen[0] += 1
+                                    ins_r = ET.SubElement(ins_e, _R_TAG)
+                                    ins_t = ET.SubElement(ins_r, _T_TAG)
+                                    ins_t.text = new_num
+                                    ins_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+
+                                    rest_r = None
+                                    if rest:
+                                        rest_r = ET.Element(_R_TAG)
+                                        rest_t = ET.SubElement(rest_r, _T_TAG)
+                                        rest_t.text = rest
+                                        rest_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+
+                                    child.insert(r_idx, del_e)
+                                    child.insert(r_idx + 1, ins_e)
+                                    if rest_r is not None:
+                                        child.insert(r_idx + 2, rest_r)
+
+                                    renum_count += 1
+                                    print(f"  [AFFIRMATION] Renumbered '{old_str.strip()}' -> '{new_num}{rest}'")
+                                    break
+    return renum_count
+
+def extract_cover_title_openxml(tree, fallback_name="Report"):
+    root = tree.getroot()
+    body = root.find(_BODY_TAG)
+    if body is None:
+        return fallback_name
+
+    title_candidates = []
+    for p in body.findall(_P_TAG):
+        pPr = p.find(_PPR_TAG)
+        if pPr is not None:
+            pStyle = pPr.find(_PSTYLE_TAG)
+            if pStyle is not None:
+                sval = pStyle.attrib.get(_w_tag("val"), "").lower()
+                if "heading" in sval:
+                    break
+                if "title" in sval and "subtitle" not in sval:
+                    t = "".join(p.itertext()).strip()
+                    if t:
+                        title_candidates.append(t)
+                        break
+
+        t = "".join(p.itertext()).strip()
+        if not t:
+            continue
+        lower_t = t.lower()
+        if any(prefix in lower_t for prefix in ["version", "ver.", "date:", "author:", "prepared by:", "model id:"]):
+            continue
+
+        for r in p.findall(_R_TAG):
+            rPr = r.find(_RPR_TAG)
+            if rPr is not None:
+                b = rPr.find(_B_TAG)
+                sz = rPr.find(_SZ_TAG)
+                is_bold = (b is not None and b.attrib.get(_w_tag("val"), "true") not in ("false", "0"))
+                sz_val = 0
+                if sz is not None:
+                    try:
+                        sz_val = int(sz.attrib.get(_w_tag("val"), "0"))
+                    except ValueError:
+                        pass
+                if is_bold or sz_val >= 28:
+                    title_candidates.append(t)
+                    break
+        if title_candidates:
+            break
+
+    if title_candidates:
+        raw_title = " ".join(title_candidates)
+    else:
+        raw_title = fallback_name
+
+    clean_title = re.sub(r'[\\/*?:"<>|\r\n\t]+', ' ', raw_title)
+    clean_title = " ".join(clean_title.split()).strip()
+    if len(clean_title) > 80:
+        clean_title = clean_title[:80].strip()
+    return clean_title if clean_title else fallback_name
+
+def run_migration_openxml(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+    """
+    Pure-Python OpenXML pipeline. Runs anywhere without Word or external dependencies.
+    """
+    def report_progress(percent, text):
+        if progress_callback:
+            try:
+                progress_callback(percent, text)
+            except Exception:
+                pass
+
+    template_path  = os.path.abspath(template_path)
+    reference_path = os.path.abspath(reference_path)
+
+    if not os.path.isfile(template_path):
+        raise FileNotFoundError(f"Template not found: {template_path}")
+    if not os.path.isfile(reference_path):
+        raise FileNotFoundError(f"Reference report not found: {reference_path}")
+
+    print("=" * 60)
+    print("  Phase 2 — Content Migration Pipeline (OpenXML)")
+    print("=" * 60)
+
+    report_progress(10, "Reading template and reference packages...")
+
+    rev_id_gen = [1000]
+
+    with zipfile.ZipFile(template_path, "r") as z_tmpl:
+        tmpl_files = {name: z_tmpl.read(name) for name in z_tmpl.namelist()}
+
+    with zipfile.ZipFile(reference_path, "r") as z_ref:
+        ref_files = {name: z_ref.read(name) for name in z_ref.namelist()}
+
+    report_progress(20, "Detecting cover title and configuring output path...")
+
+    tmpl_tree = ET.ElementTree(ET.fromstring(tmpl_files["word/document.xml"]))
+    tmpl_root = tmpl_tree.getroot()
+    tmpl_body = tmpl_root.find(_BODY_TAG)
+
+    if output_path is None:
+        tmpl_dir = os.path.dirname(template_path)
+        tmpl_base, ext = os.path.splitext(os.path.basename(template_path))
+        cover_title = extract_cover_title_openxml(tmpl_tree, fallback_name=tmpl_base)
+        output_filename = f"{cover_title}_Draft{ext}"
+        output_path = os.path.join(tmpl_dir, output_filename)
+        print(f"[INFO] Cover page title: \"{cover_title}\" -> Draft filename: \"{output_filename}\"")
+    else:
+        output_path = os.path.abspath(output_path)
+
+    report_progress(35, "Parsing section structures...")
+
+    ref_tree = ET.ElementTree(ET.fromstring(ref_files["word/document.xml"]))
+    ref_root = ref_tree.getroot()
+    ref_body = ref_root.find(_BODY_TAG)
+
+    tmpl_sections = parse_docx_sections_openxml(tmpl_body)
+    ref_sections = parse_docx_sections_openxml(ref_body)
+    ref_sec_by_key = {s['key']: s for s in ref_sections}
+
+    report_progress(50, "Migrating matched sections with Track Changes...")
+
+    migrated_count = 0
+    for s in reversed(tmpl_sections):
+        k = s['key']
+        if k in ref_sec_by_key:
+            ref_s = ref_sec_by_key[k]
+            if ref_s['body_elements']:
+                h_elem = s['heading_element']
+                h_idx = list(tmpl_body).index(h_elem)
+                insert_pos = h_idx + 1
+                for ref_elem in ref_s['body_elements']:
+                    clone = ET.fromstring(ET.tostring(ref_elem))
+                    wrap_in_tracked_ins_openxml(clone, rev_id_gen)
+                    tmpl_body.insert(insert_pos, clone)
+                    insert_pos += 1
+                migrated_count += 1
+                print(f"  [MIGRATE] Migrated: {s['text']}")
+
+    report_progress(75, "Scanning and deleting red-italic instructions...")
+    del_inst_count = delete_red_italic_openxml(tmpl_body, rev_id_gen)
+    print(f"  [INFO] Deleted {del_inst_count} red-italic instruction block(s).")
+
+    if str(target_report_type).strip().lower() == "affirmation":
+        report_progress(85, "Tailoring Affirmation report (pruning Section 2 & renumbering)...")
+        tailor_affirmation_openxml(tmpl_body, rev_id_gen)
+
+    report_progress(92, "Enabling Track Changes in settings...")
+
+    settings_data = tmpl_files.get("word/settings.xml", None)
+    if settings_data is not None:
+        s_tree = ET.ElementTree(ET.fromstring(settings_data))
+        s_root = s_tree.getroot()
+        if s_root.find(_TRACK_REV_TAG) is None:
+            ET.SubElement(s_root, _TRACK_REV_TAG)
+        tmpl_files["word/settings.xml"] = ET.tostring(s_root, encoding="utf-8", xml_declaration=True)
+    else:
+        new_settings = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:settings xmlns:w="{W_NS}"><w:trackRevisions/></w:settings>'
+        tmpl_files["word/settings.xml"] = new_settings.encode("utf-8")
+
+    tmpl_files["word/document.xml"] = ET.tostring(tmpl_root, encoding="utf-8", xml_declaration=True)
+
+    for r_name, r_bytes in ref_files.items():
+        if r_name.startswith("word/media/") and r_name not in tmpl_files:
+            tmpl_files[r_name] = r_bytes
+
+    report_progress(96, f"Writing output package -> {os.path.basename(output_path)}...")
+
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
+
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
+        for fname, content in tmpl_files.items():
+            z_out.writestr(fname, content)
+
+    report_progress(100, "Draft report generated successfully!")
+
+    print("\n" + "=" * 60)
+    print("  ✅  Pipeline completed successfully (OpenXML)")
+    print("=" * 60)
+    print(f"  Report type      : {detect_report_type(reference_path)}")
+    print(f"  Sections matched : {migrated_count}")
+    print(f"  Red-italic blocks: {del_inst_count} deleted")
+    print(f"  Output file      : {os.path.basename(output_path)}")
+    print("=" * 60)
+    return output_path
+
+
+# ============================================================================
+# UNIFIED CROSS-PLATFORM DISPATCHER
+# ============================================================================
+
+def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+    """
+    Cross-Platform Entry Point:
+      - On Windows with pywin32: uses Word COM automation (run_migration_windows_com)
+      - On macOS, Linux, or without pywin32: uses pure-Python OpenXML engine (run_migration_openxml)
+    """
+    if sys.platform == "win32" and win32com is not None:
+        try:
+            return run_migration_windows_com(
+                template_path=template_path,
+                reference_path=reference_path,
+                output_path=output_path,
+                target_report_type=target_report_type,
+                progress_callback=progress_callback
+            )
+        except Exception as exc:
+            print(f"[WARNING] Windows COM engine encountered an issue: {exc}. Falling back to OpenXML engine.")
+            return run_migration_openxml(
+                template_path=template_path,
+                reference_path=reference_path,
+                output_path=output_path,
+                target_report_type=target_report_type,
+                progress_callback=progress_callback
+            )
+    else:
+        return run_migration_openxml(
+            template_path=template_path,
+            reference_path=reference_path,
+            output_path=output_path,
+            target_report_type=target_report_type,
+            progress_callback=progress_callback
+        )
+
 
 
 # ============================================================================

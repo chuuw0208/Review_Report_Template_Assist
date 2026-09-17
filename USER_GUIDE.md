@@ -21,7 +21,7 @@ This desktop application automates drafting Model Risk Management review reports
 
 ---
 
-## 🚀 Quick Start (For Validators & Colleagues)
+## 🚀 Quick Start (Cross-Platform: Windows & macOS)
 
 ### Step 1: Place the Folder on Your Machine
 Extract or copy the tool folder to your computer:
@@ -29,14 +29,30 @@ Extract or copy the tool folder to your computer:
 WordAutomation/
 ├── gui_app.py
 ├── phase2_core.py
-├── Launch_Tool.vbs             <-- Double-click for 100% silent, instant launch!
-├── run_tool.bat               <-- Batch launcher (auto-closes terminal upon UI start)
+├── Launch_Tool.vbs             <-- Windows: Double-click for 100% silent, instant launch!
+├── run_tool.bat               <-- Windows: Batch launcher (auto-detaches to pythonw.exe)
+├── run_tool.command           <-- macOS: Double-click in Finder to launch on MacBook!
 └── USER_GUIDE.md
 ```
 
 ### Step 2: Launch the Tool
+
+#### On Windows (Bank Laptop):
 - **Recommended**: Double-click **`Launch_Tool.vbs`** — opens instantly without any Command Prompt window or flash, shows the startup verification screen, and transitions directly into the workspace.
 - **Alternative**: Double-click **`run_tool.bat`** — immediately detaches into `pythonw.exe`, closing the black console window automatically.
+
+#### On macOS (MacBook):
+- **Recommended**: Double-click **`run_tool.command`** in Finder — opens the app immediately.
+- **Alternative**: Open Terminal in this folder and run `python3 gui_app.py`.
+
+---
+
+## ⚡ Dual-Engine Architecture (Windows COM + Pure OpenXML)
+
+The tool features an intelligent **Dual-Engine Architecture**:
+1. **Windows COM Engine**: On Windows laptops with Microsoft Office installed, uses native Word COM automation (`win32com`) to perform tracked changes.
+2. **Pure Python OpenXML Engine**: On macOS (MacBook) or systems without MS Word / COM installed, the tool automatically uses its built-in OpenXML engine (`zipfile` + WordprocessingML). It runs in ~0.2 seconds with **zero third-party dependencies**, generating 100% compliant Word documents with native Track Changes (`<w:ins>`, `<w:del>`, `<w:trackRevisions/>`).
+
 
 ---
 

@@ -62,6 +62,8 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
     Hook Windows Explorer file drag-and-drop directly via ctypes.
     Ensures dragging files from Windows Explorer shows the '+' (Drop) cursor
     and properly delivers dropped file paths without external dependencies.
+    Only hooks root.winfo_id() (the client area) so native window title bar
+    and window movement are NEVER interfered with.
     """
     if sys.platform != "win32":
         return False
@@ -75,28 +77,51 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
 
         WM_DROPFILES = 0x0233
         GWL_WNDPROC = -4
+        is_64bit = ctypes.sizeof(ctypes.c_void_p) == 8
 
-        try:
-            hwnd = root.winfo_id()
-            parent_hwnd = user32.GetParent(hwnd)
-            target_hwnd = parent_hwnd if parent_hwnd != 0 else hwnd
-        except Exception:
+        root.update_idletasks()
+        target_hwnd = root.winfo_id()
+        if not target_hwnd:
             return False
 
+        # Configure 64-bit safe ctypes function prototypes
+        if is_64bit:
+            GetWindowLongPtr = getattr(user32, 'GetWindowLongPtrW', user32.GetWindowLongW)
+            SetWindowLongPtr = getattr(user32, 'SetWindowLongPtrW', user32.SetWindowLongW)
+        else:
+            GetWindowLongPtr = user32.GetWindowLongW
+            SetWindowLongPtr = user32.SetWindowLongW
+
+        GetWindowLongPtr.argtypes = [wintypes.HWND, ctypes.c_int]
+        GetWindowLongPtr.restype = ctypes.c_void_p
+
+        SetWindowLongPtr.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        SetWindowLongPtr.restype = ctypes.c_void_p
+
+        user32.CallWindowProcW.argtypes = [
+            ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        ]
+        user32.CallWindowProcW.restype = ctypes.c_longlong if is_64bit else ctypes.c_long
+
+        shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+        shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT, wintypes.LPWSTR, wintypes.UINT]
+        shell32.DragQueryPoint.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.POINT)]
+        shell32.DragFinish.argtypes = [wintypes.HANDLE]
+
+        # Enable dragging onto client area ONLY (never touch parent window/title bar!)
         shell32.DragAcceptFiles(target_hwnd, True)
 
+        old_wndproc = GetWindowLongPtr(target_hwnd, GWL_WNDPROC)
+        if not old_wndproc:
+            return False
+
         WNDPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long,
+            ctypes.c_longlong if is_64bit else ctypes.c_long,
             wintypes.HWND,
             wintypes.UINT,
             wintypes.WPARAM,
             wintypes.LPARAM
         )
-
-        GetWindowLong = getattr(user32, 'GetWindowLongPtrW', getattr(user32, 'GetWindowLongW', None))
-        SetWindowLong = getattr(user32, 'SetWindowLongPtrW', getattr(user32, 'SetWindowLongW', None))
-
-        old_wndproc = GetWindowLong(target_hwnd, GWL_WNDPROC)
 
         def custom_wndproc(h_wnd, msg, w_param, l_param):
             if msg == WM_DROPFILES:
@@ -120,9 +145,11 @@ def setup_native_win32_drag_and_drop(root, on_files_dropped_callback):
             return user32.CallWindowProcW(old_wndproc, h_wnd, msg, w_param, l_param)
 
         new_proc = WNDPROC(custom_wndproc)
-        SetWindowLong(target_hwnd, GWL_WNDPROC, new_proc)
-        root._native_dnd_proc = new_proc
-        return True
+        res = SetWindowLongPtr(target_hwnd, GWL_WNDPROC, ctypes.cast(new_proc, ctypes.c_void_p))
+        if res:
+            root._native_dnd_proc = new_proc
+            return True
+        return False
 
     except Exception as ex:
         print(f"[DragAndDrop] Native hook failed: {ex}")
@@ -194,6 +221,23 @@ class ModernCompletionModal(tk.Toplevel):
             bg="#ffffff"
         )
         title.pack(side=tk.LEFT)
+
+        # Allow dragging modal dialog by clicking its header
+        def _on_modal_drag_start(e):
+            self._modal_drag_x = e.x_root - self.winfo_x()
+            self._modal_drag_y = e.y_root - self.winfo_y()
+
+        def _on_modal_drag_motion(e):
+            nx = e.x_root - self._modal_drag_x
+            ny = e.y_root - self._modal_drag_y
+            self.geometry(f"+{nx}+{ny}")
+
+        header_row.bind("<Button-1>", _on_modal_drag_start)
+        header_row.bind("<B1-Motion>", _on_modal_drag_motion)
+        title.bind("<Button-1>", _on_modal_drag_start)
+        title.bind("<B1-Motion>", _on_modal_drag_motion)
+        icon_badge.bind("<Button-1>", _on_modal_drag_start)
+        icon_badge.bind("<B1-Motion>", _on_modal_drag_motion)
 
         # Subtitle
         subtitle = tk.Label(
@@ -404,6 +448,25 @@ class MRMAutomationApp(BaseWindow):
         )
         subtitle.pack(anchor="w", pady=(2, 14))
 
+        # Allow dragging the window during startup view
+        def _on_startup_drag_start(e):
+            self._startup_drag_x = e.x_root - self.winfo_x()
+            self._startup_drag_y = e.y_root - self.winfo_y()
+
+        def _on_startup_drag_motion(e):
+            nx = e.x_root - self._startup_drag_x
+            ny = e.y_root - self._startup_drag_y
+            self.geometry(f"+{nx}+{ny}")
+
+        self.startup_frame.bind("<Button-1>", _on_startup_drag_start)
+        self.startup_frame.bind("<B1-Motion>", _on_startup_drag_motion)
+        card.bind("<Button-1>", _on_startup_drag_start)
+        card.bind("<B1-Motion>", _on_startup_drag_motion)
+        title.bind("<Button-1>", _on_startup_drag_start)
+        title.bind("<B1-Motion>", _on_startup_drag_motion)
+        subtitle.bind("<Button-1>", _on_startup_drag_start)
+        subtitle.bind("<B1-Motion>", _on_startup_drag_motion)
+
         # Progress Bar
         self.startup_progress = ttk.Progressbar(
             card,
@@ -475,31 +538,35 @@ class MRMAutomationApp(BaseWindow):
         py_ver = f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         self.startup_queue.put(("python", f"✔  Python Runtime: {py_ver}", self.c_brand, 40))
 
-        # Step 2: pywin32 / COM
+        # Step 2: Automation Interface (Windows COM vs macOS)
         time.sleep(0.2)
-        has_win32 = False
-        try:
-            import win32com.client
-            import pythoncom
-            has_win32 = True
-        except ImportError:
+        if sys.platform == "win32":
+            has_win32 = False
             try:
-                self.startup_queue.put(("win32", "⚙  Installing 'pywin32' dependency...", "#d97706", None))
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "pywin32", "--quiet"],
-                    capture_output=True,
-                    timeout=30
-                )
                 import win32com.client
                 import pythoncom
                 has_win32 = True
-            except Exception:
-                has_win32 = False
+            except ImportError:
+                try:
+                    self.startup_queue.put(("win32", "⚙  Installing 'pywin32' dependency...", "#d97706", None))
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "pywin32", "--quiet"],
+                        capture_output=True,
+                        timeout=30
+                    )
+                    import win32com.client
+                    import pythoncom
+                    has_win32 = True
+                except Exception:
+                    has_win32 = False
 
-        if has_win32:
-            self.startup_queue.put(("win32", "✔  Word COM Interface: Ready (pywin32)", self.c_brand, 75))
+            if has_win32:
+                self.startup_queue.put(("win32", "✔  Word COM Interface: Ready (pywin32)", self.c_brand, 75))
+            else:
+                self.startup_queue.put(("win32", "⚠  Word COM: pywin32 not loaded (migration will warn)", "#d97706", 75))
         else:
-            self.startup_queue.put(("win32", "⚠  Word COM: pywin32 not loaded (migration will warn)", "#d97706", 75))
+            # macOS platform
+            self.startup_queue.put(("win32", "✔  macOS Platform Detected: Ready", self.c_brand, 75))
 
         # Step 3: Migration engine
         time.sleep(0.2)
@@ -551,6 +618,21 @@ class MRMAutomationApp(BaseWindow):
             bg=self.c_canvas
         )
         title_label.pack(side=tk.LEFT, anchor="w")
+
+        # Allow dragging the window by clicking the top header inside the UI
+        def _on_main_drag_start(e):
+            self._main_drag_x = e.x_root - self.winfo_x()
+            self._main_drag_y = e.y_root - self.winfo_y()
+
+        def _on_main_drag_motion(e):
+            nx = e.x_root - self._main_drag_x
+            ny = e.y_root - self._main_drag_y
+            self.geometry(f"+{nx}+{ny}")
+
+        header_frame.bind("<Button-1>", _on_main_drag_start)
+        header_frame.bind("<B1-Motion>", _on_main_drag_motion)
+        title_label.bind("<Button-1>", _on_main_drag_start)
+        title_label.bind("<B1-Motion>", _on_main_drag_motion)
 
         # ---------------- 2. Side-by-Side Upload Cards (左右排版) ----------------
         cards_container = tk.Frame(root_padding, bg=self.c_canvas)
