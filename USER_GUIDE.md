@@ -27,23 +27,20 @@ This desktop application automates drafting Model Risk Management review reports
 Extract or copy the tool folder to your computer:
 ```
 WordAutomation/
+├── Launch_on_Windows.vbs        <-- Double-click on Windows (Instant silent launch, no cmd window!)
+├── Launch_on_Mac.command        <-- Double-click on macOS (Launches app directly from Finder!)
 ├── gui_app.py
 ├── phase2_core.py
-├── Launch_Tool.vbs             <-- Windows: Double-click for 100% silent, instant launch!
-├── run_tool.bat               <-- Windows: Batch launcher (auto-detaches to pythonw.exe)
-├── run_tool.command           <-- macOS: Double-click in Finder to launch on MacBook!
 └── USER_GUIDE.md
 ```
 
 ### Step 2: Launch the Tool
 
-#### On Windows (Bank Laptop):
-- **Recommended**: Double-click **`Launch_Tool.vbs`** — opens instantly without any Command Prompt window or flash, shows the startup verification screen, and transitions directly into the workspace.
-- **Alternative**: Double-click **`run_tool.bat`** — immediately detaches into `pythonw.exe`, closing the black console window automatically.
+- **On Windows (Bank Laptop)**:  
+  Double-click **`Launch_on_Windows.vbs`** — opens instantly without any Command Prompt window or flash, shows the startup verification screen, and transitions directly into the workspace.
+- **On macOS (MacBook)**:  
+  Double-click **`Launch_on_Mac.command`** in Finder — opens the app immediately.
 
-#### On macOS (MacBook):
-- **Recommended**: Double-click **`run_tool.command`** in Finder — opens the app immediately.
-- **Alternative**: Open Terminal in this folder and run `python3 gui_app.py`.
 
 ---
 
