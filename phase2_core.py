@@ -427,34 +427,50 @@ def delete_red_italic_text(doc):
 
 def remove_affirmation_excluded_sections(template_doc):
     """
-    For Affirmation reports:
-      1. Eliminate Section 2 ('Additional Analysis since prior review' and subsections 2.1, 2.2, 2.3).
-      2. Renumber Section 3 ('3. Governance & Controls' and 3.1, 3.2, etc.) to Section 2 ('2.', '2.1', '2.2').
-    With TrackRevisions ON, deletions and renumbering appear as tracked revisions.
+    Robust Affirmation tailoring for Word COM:
+      1. Prunes Section 2 ('Additional Analysis since prior review' and all its subsections)
+         BEFORE Track Changes is engaged, transforming the working copy into a clean Affirmation template.
+      2. For Auto-Numbered headings (Word Multilevel Lists), Word automatically, natively,
+         and instantly recalculates Section 3 -> 2, 3.1 -> 2.1, 3.2 -> 2.2, 3.3 -> 2.3!
+      3. For Typed-Numbered headings (where numbers are static text), scans and updates
+         typed text numbers (3. -> 2., 3.1 -> 2.1, etc.).
     """
+    was_tracking = template_doc.TrackRevisions
+    template_doc.TrackRevisions = False
+
     headings = build_section_map(template_doc)
     deleted_sec2 = False
 
-    # Step 1: Delete Section 2
+    # Step 1: Find Section 2 and compute full range up to next Heading 1
+    sec2_idx = None
     for idx, h in enumerate(headings):
-        if "additional analysis since prior review" in h["key"]:
-            start_pos = h["heading_start"]
-            end_pos = h["body_end"]
-            for next_h in headings[idx + 1:]:
-                if next_h["level"] == 1:
-                    end_pos = next_h["heading_start"]
-                    break
-                else:
-                    end_pos = next_h["body_end"]
-
-            print(f"\n  [AFFIRMATION] Removing Section 2 ('{h['text']}' and subsections) under Track Changes...")
-            del_range = template_doc.Range(start_pos, end_pos)
-            del_range.Delete()
-            deleted_sec2 = True
+        if "additional analysis since prior review" in h["key"] or "additional analysis" in h["key"]:
+            sec2_idx = idx
             break
 
-    # Step 2: Renumber Section 3 -> Section 2 (3. -> 2., 3.1 -> 2.1, 3.2 -> 2.2)
-    print(f"\n  [AFFIRMATION] Renumbering Section 3 to Section 2 under Track Changes...")
+    if sec2_idx is not None:
+        h = headings[sec2_idx]
+        start_pos = h["heading_start"]
+        end_pos = template_doc.Content.End
+        for next_h in headings[sec2_idx + 1:]:
+            if next_h["level"] == 1:
+                end_pos = next_h["heading_start"]
+                break
+            else:
+                end_pos = next_h["body_end"]
+
+        print(f"\n  [AFFIRMATION] Removing Section 2 ('{h['text']}' and all subsections) to adapt template for Affirmation...")
+        del_range = template_doc.Range(start_pos, end_pos)
+        del_range.Delete()
+        deleted_sec2 = True
+
+    # Update Word fields & list numbering
+    try:
+        template_doc.Fields.Update()
+    except Exception:
+        pass
+
+    # Step 2: Fallback for Typed-Numbered headings (e.g. static '3.', '3.1', '3.1.1')
     para_count = template_doc.Paragraphs.Count
     for i in range(1, para_count + 1):
         try:
@@ -465,31 +481,35 @@ def remove_affirmation_excluded_sections(template_doc):
 
         if style_name in HEADING_STYLE_NAMES:
             text = para.Range.Text
-            # Look for leading "3." in heading
-            m = re.match(r'^(\s*)3\.', text)
+            m = re.match(r'^(\s*)3(\.[\d\.]*)(.*)', text)
             if m:
-                leading_spaces = len(m.group(1))
-                num_start = para.Range.Start + leading_spaces
-                num_end = num_start + 2  # len of "3." is 2
-                num_range = template_doc.Range(num_start, num_end)
-                if num_range.Text == "3.":
-                    print(f"  [RENUMBER] '{text.strip()}' -> '2.{text.strip()[leading_spaces+2:]}'")
-                    num_range.Text = "2."
-                else:
-                    try:
-                        f = para.Range.Find
-                        f.ClearFormatting()
-                        f.Text = "3."
-                        f.Replacement.ClearFormatting()
-                        f.Replacement.Text = "2."
-                        f.Forward = True
-                        f.Wrap = 0  # wdFindStop
-                        f.Execute(Replace=1)  # wdReplaceOne
-                        print(f"  [RENUMBER via Find] '{text.strip()}'")
-                    except Exception as e:
-                        print(f"  [WARNING] Renumber failed for '{text.strip()}': {e}")
+                leading = m.group(1)
+                num_tail = m.group(2)
+                rest = m.group(3)
+                old_num = f"{leading}3{num_tail}"
+                new_num = f"{leading}2{num_tail}"
+                try:
+                    f = para.Range.Find
+                    f.ClearFormatting()
+                    f.Text = old_num
+                    f.Replacement.ClearFormatting()
+                    f.Replacement.Text = new_num
+                    f.Forward = True
+                    f.Wrap = 0  # wdFindStop
+                    f.Execute(Replace=1)  # wdReplaceOne
+                    print(f"  [TYPED RENUMBER] '{text.strip()}' -> '{new_num}{rest.strip()}'")
+                except Exception as e:
+                    print(f"  [WARN] Failed to renumber heading '{text.strip()}': {e}")
+            else:
+                try:
+                    if para.Range.ListFormat.ListType != 0:
+                        print(f"  [AUTO-NUMBERED] '{text.strip()}' is auto-numbered by Word (ListString: {para.Range.ListFormat.ListString}).")
+                except Exception:
+                    pass
 
+    template_doc.TrackRevisions = was_tracking
     return deleted_sec2
+
 
 
 def extract_cover_title(doc, fallback_name="Report"):
@@ -637,7 +657,7 @@ def run_migration_windows_com(template_path, reference_path, output_path=None, t
         report_type = detect_report_type(reference_path)
         print(f"[INFO] Report type detected: {report_type}\n")
 
-        report_progress(35, "Opening documents and mapping sections...")
+        report_progress(25, "Opening reference and working documents...")
 
         # ---- Open documents ----
         reference_doc = word.Documents.Open(reference_path, ReadOnly=True)
@@ -647,11 +667,17 @@ def run_migration_windows_com(template_path, reference_path, output_path=None, t
         template_doc = word.Documents.Open(output_path)
         print(f"[INFO] Opened working copy:          {os.path.basename(output_path)}")
 
+        # ---- Target Report Type tailoring (Affirmation normalization) ----
+        if str(target_report_type).strip().lower() == "affirmation":
+            report_progress(30, "Tailoring template for Affirmation (removing Section 2)...")
+            remove_affirmation_excluded_sections(template_doc)
+
         # ---- Track Changes ON ----
         template_doc.TrackRevisions = True
         print("[INFO] Track Changes -> ON\n")
 
         # ---- Build section maps ----
+        report_progress(35, "Mapping document sections...")
         print("--- Section map: Reference ---")
         ref_headings = build_section_map(reference_doc)
 
@@ -674,13 +700,8 @@ def run_migration_windows_com(template_path, reference_path, output_path=None, t
         print(f"\n--- Deleting red-italic instruction text ---")
         deleted = delete_red_italic_text(template_doc)
 
-        # ---- Target Report Type tailoring (Affirmation pruning) ----
-        if str(target_report_type).strip().lower() == "affirmation":
-            report_progress(90, "Pruning Section 2 for Affirmation report...")
-            print(f"\n--- Tailoring for Affirmation Report ---")
-            remove_affirmation_excluded_sections(template_doc)
-
         report_progress(95, "Saving output draft document...")
+
 
         # ---- Save ----
         template_doc.Save()
@@ -952,91 +973,63 @@ def delete_red_italic_openxml(body_elem, rev_id_gen):
 
     return deleted_count
 
-def tailor_affirmation_openxml(body_elem, rev_id_gen):
-    now_str = _get_iso_now()
+def tailor_affirmation_openxml(body_elem):
+    """
+    Robust Affirmation tailoring for OpenXML:
+      1. Prunes Section 2 ('Additional Analysis since prior review' and all its subsections)
+         cleanly from the document body before migration.
+      2. For Auto-Numbered headings (headings with numPr), Word automatically,
+         natively, and instantly recalculates Section 3 -> 2, 3.1 -> 2.1, 3.2 -> 2.2!
+      3. For Typed-Numbered headings (where numbers are literal text in <w:t>),
+         scans and renumbers '3.' -> '2.', '3.1' -> '2.1', '3.2' -> '2.2'.
+    """
     children = list(body_elem)
-
-    # 1. Delete Section 2 and all subsections
     sec2_start_idx = None
     sec2_end_idx = len(children)
+
     for idx, child in enumerate(children):
         if child.tag == _P_TAG:
             lvl, text = get_heading_info_openxml(child)
             if lvl == 1:
                 norm = normalize_heading(text)
-                if "additional analysis since prior review" in norm:
+                if "additional analysis since prior review" in norm or "additional analysis" in norm:
                     sec2_start_idx = idx
                 elif sec2_start_idx is not None and idx > sec2_start_idx:
                     sec2_end_idx = idx
                     break
 
     if sec2_start_idx is not None:
-        print(f"  [AFFIRMATION] Deleting Section 2 and all subsections (elements {sec2_start_idx} to {sec2_end_idx})...")
-        for i in range(sec2_start_idx, sec2_end_idx):
-            delete_element_tracked_openxml(children[i], rev_id_gen)
+        print(f"  [ROBUST AFFIRMATION] Removing Section 2 elements {sec2_start_idx} to {sec2_end_idx} to adapt template for Affirmation...")
+        for i in range(sec2_end_idx - 1, sec2_start_idx - 1, -1):
+            body_elem.remove(children[i])
 
-    # 2. Renumber Section 3 -> Section 2
+    # Inspect remaining headings for typed numbers and renumber if needed
     renum_count = 0
-    for child in children:
-        if child.tag == _P_TAG:
-            lvl, text = get_heading_info_openxml(child)
-            if lvl is not None and text:
-                m = re.match(r'^(\s*)(3)(\.|\.\d+)', text)
-                if m:
-                    for r in child.findall(_R_TAG):
-                        for t in r.findall(_T_TAG):
-                            if t.text and re.match(r'^(\s*)3(\.|\.\d+)', t.text):
-                                old_str = t.text
-                                m_run = re.match(r'^(\s*)(3)(\.|\.\d+)(.*)', old_str)
-                                if m_run:
-                                    leading = m_run.group(1)
-                                    num_tail = m_run.group(3)
-                                    rest = m_run.group(4)
+    for child in body_elem.findall(_P_TAG):
+        lvl, text = get_heading_info_openxml(child)
+        if lvl is not None and text:
+            m = re.match(r'^(\s*)3(\.[\d\.]*)(.*)', text)
+            if m:
+                leading = m.group(1)
+                num_tail = m.group(2)
+                rest = m.group(3)
+                old_num = f"{leading}3{num_tail}"
+                new_num = f"{leading}2{num_tail}"
 
-                                    old_num = f"{leading}3{num_tail}"
-                                    new_num = f"{leading}2{num_tail}"
+                for r in child.findall(_R_TAG):
+                    for t in r.findall(_T_TAG):
+                        if t.text and re.match(r'^(\s*)3(\.[\d\.]*)', t.text):
+                            t.text = re.sub(r'^(\s*)3(\.[\d\.]*)', f"\\g<1>2\\g<2>", t.text)
+                            renum_count += 1
+                            print(f"  [TYPED RENUMBER] '{old_num}{rest.strip()}' -> '{new_num}{rest.strip()}'")
+                            break
+            else:
+                pPr = child.find(_PPR_TAG)
+                if pPr is not None and pPr.find(_w_tag("numPr")) is not None:
+                    print(f"  [AUTO-NUMBERED] '{text.strip()}' will be automatically numbered by Word (native list cascade).")
 
-                                    r_idx = list(child).index(r)
-                                    child.remove(r)
-
-                                    # Tracked del old
-                                    del_e = ET.Element(_DEL_TAG)
-                                    del_e.attrib[_w_tag("id")] = str(rev_id_gen[0])
-                                    del_e.attrib[_w_tag("author")] = REVISION_AUTHOR
-                                    del_e.attrib[_w_tag("date")] = now_str
-                                    rev_id_gen[0] += 1
-                                    del_r = ET.SubElement(del_e, _R_TAG)
-                                    del_t = ET.SubElement(del_r, _DELTEXT_TAG)
-                                    del_t.text = old_num
-                                    del_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
-
-                                    # Tracked ins new
-                                    ins_e = ET.Element(_INS_TAG)
-                                    ins_e.attrib[_w_tag("id")] = str(rev_id_gen[0])
-                                    ins_e.attrib[_w_tag("author")] = REVISION_AUTHOR
-                                    ins_e.attrib[_w_tag("date")] = now_str
-                                    rev_id_gen[0] += 1
-                                    ins_r = ET.SubElement(ins_e, _R_TAG)
-                                    ins_t = ET.SubElement(ins_r, _T_TAG)
-                                    ins_t.text = new_num
-                                    ins_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
-
-                                    rest_r = None
-                                    if rest:
-                                        rest_r = ET.Element(_R_TAG)
-                                        rest_t = ET.SubElement(rest_r, _T_TAG)
-                                        rest_t.text = rest
-                                        rest_t.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
-
-                                    child.insert(r_idx, del_e)
-                                    child.insert(r_idx + 1, ins_e)
-                                    if rest_r is not None:
-                                        child.insert(r_idx + 2, rest_r)
-
-                                    renum_count += 1
-                                    print(f"  [AFFIRMATION] Renumbered '{old_str.strip()}' -> '{new_num}{rest}'")
-                                    break
     return renum_count
+
 
 def extract_cover_title_openxml(tree, fallback_name="Report"):
     root = tree.getroot()
@@ -1144,6 +1137,11 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
     else:
         output_path = os.path.abspath(output_path)
 
+    # ---- Target Report Type tailoring (Affirmation template adaptation) ----
+    if str(target_report_type).strip().lower() == "affirmation":
+        report_progress(30, "Tailoring template for Affirmation (removing Section 2)...")
+        tailor_affirmation_openxml(tmpl_body)
+
     report_progress(35, "Parsing section structures...")
 
     ref_tree = ET.ElementTree(ET.fromstring(ref_files["word/document.xml"]))
@@ -1177,11 +1175,8 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
     del_inst_count = delete_red_italic_openxml(tmpl_body, rev_id_gen)
     print(f"  [INFO] Deleted {del_inst_count} red-italic instruction block(s).")
 
-    if str(target_report_type).strip().lower() == "affirmation":
-        report_progress(85, "Tailoring Affirmation report (pruning Section 2 & renumbering)...")
-        tailor_affirmation_openxml(tmpl_body, rev_id_gen)
-
     report_progress(92, "Enabling Track Changes in settings...")
+
 
     settings_data = tmpl_files.get("word/settings.xml", None)
     if settings_data is not None:
