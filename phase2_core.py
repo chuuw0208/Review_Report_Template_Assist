@@ -34,6 +34,11 @@ except ImportError:
     win32com = None
     pythoncom = None
 
+try:
+    import win32api
+except ImportError:
+    win32api = None
+
 # OpenXML Namespaces
 OPENXML_NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -250,6 +255,63 @@ def match_sections(template_headings, reference_headings):
 
 
 # ============================================================================
+# CLIPBOARD-SAFE RANGE TRANSFER (COM)
+# ============================================================================
+
+CLIPBOARD_SETTLE_MS = 200   # pause after Copy/Paste so heavy images/charts finish
+CLIPBOARD_RETRIES   = 3     # retries on transient "clipboard busy" COM errors
+
+
+def _settle_clipboard(ms=CLIPBOARD_SETTLE_MS):
+    """
+    DoEvents() equivalent: pump pending Windows messages, then sleep briefly
+    so the clipboard can finish rendering large images / MS Graph objects
+    before the next Copy() or Paste().
+    """
+    if pythoncom is not None:
+        try:
+            pythoncom.PumpWaitingMessages()
+        except Exception:
+            pass
+    if win32api is not None:
+        win32api.Sleep(ms)
+    else:
+        time.sleep(ms / 1000.0)
+
+
+def copy_paste_section(reference_doc, template_doc, src_start, src_end, dest_pos,
+                       retries=CLIPBOARD_RETRIES):
+    """
+    Copy reference_doc[src_start:src_end] and paste it at template_doc[dest_pos].
+
+    Range.Copy()/Range.Paste() is Word's native clipboard transfer, so it
+    carries everything anchored in the range: text, tables, inline shapes
+    (pictures), floating shapes, charts and MS Graph / OLE objects.
+
+    The paste point is a collapsed range, so nothing in the template is
+    overwritten. With TrackRevisions ON the paste is recorded as an insertion.
+
+    Raises the last COM error if every attempt fails.
+    """
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            src = reference_doc.Range(src_start, src_end)
+            src.Copy()
+            _settle_clipboard()          # let the clipboard render images
+
+            dest = template_doc.Range(dest_pos, dest_pos)
+            dest.Paste()
+            _settle_clipboard()          # let Word finish placing shapes
+            return
+        except Exception as exc:         # e.g. "OpenClipboard failed" / RPC busy
+            last_exc = exc
+            print(f"  [WARN] Copy/Paste attempt {attempt}/{retries} failed: {exc}")
+            _settle_clipboard(CLIPBOARD_SETTLE_MS * attempt * 2)
+    raise last_exc
+
+
+# ============================================================================
 # CONTENT MIGRATION
 # ============================================================================
 
@@ -287,17 +349,14 @@ def migrate_sections(template_doc, reference_doc, matched):
         print(f"  [MIGRATE] \"{tmpl_h['text']}\" ← ref \"{ref_h['text']}\"")
 
         try:
-            # Step 1 — copy reference body to clipboard
-            ref_body = reference_doc.Range(ref_h["body_start"], ref_h["body_end"])
-            ref_body.Copy()
-
-            # Step 2 — INSERT at body start (collapsed range = no deletion)
-            # This preserves all existing template body content below.
-            insert_point = template_doc.Range(
-                tmpl_h["body_start"], tmpl_h["body_start"]
+            # Copy the reference body (text + images + charts) and INSERT it at
+            # the template body start (collapsed range = no deletion), which
+            # preserves all existing template body content below.
+            copy_paste_section(
+                reference_doc, template_doc,
+                ref_h["body_start"], ref_h["body_end"],
+                tmpl_h["body_start"],
             )
-            insert_point.Paste()
-
             migrated += 1
         except Exception as exc:
             print(f"  [ERROR] Failed to migrate \"{tmpl_h['text']}\": {exc}")
