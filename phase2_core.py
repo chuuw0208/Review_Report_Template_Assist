@@ -73,6 +73,8 @@ _DEL_TAG = _w_tag("del")
 _DELTEXT_TAG = _w_tag("delText")
 _BODY_TAG = _w_tag("body")
 _TBL_TAG = _w_tag("tbl")
+_TR_TAG = _w_tag("tr")
+_TC_TAG = _w_tag("tc")
 _SETTINGS_TAG = _w_tag("settings")
 _TRACK_REV_TAG = _w_tag("trackRevisions")
 
@@ -787,7 +789,7 @@ def extract_cover_title(doc, fallback_name="Report"):
 # WINDOWS WORD COM ENGINE
 # ============================================================================
 
-def run_migration_windows_com(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+def run_migration_windows_com(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None, table_cell_rules=None):
     """
     Windows-native Word COM pipeline (uses installed MS Word application).
     """
@@ -902,6 +904,11 @@ def run_migration_windows_com(template_path, reference_path, output_path=None, t
         # ---- Delete red-italic ----
         print(f"\n--- Deleting red-italic instruction text ---")
         deleted = delete_red_italic_text(template_doc)
+
+        # ---- Apply table cell rules if requested ----
+        if table_cell_rules:
+            print(f"\n--- Applying table cell rules ---")
+            apply_table_cell_rules(template_doc, table_cell_rules)
 
         report_progress(95, "Saving output draft document...")
 
@@ -1293,6 +1300,113 @@ def extract_cover_title_openxml(tree, fallback_name="Report"):
         clean_title = clean_title[:80].strip()
     return clean_title if clean_title else fallback_name
 
+
+# ============================================================================
+# TABLE CELL TARGETING (OPENXML)
+# ============================================================================
+
+def find_table_by_header_openxml(body_elem, table_identifier_text, occurrence=1):
+    """
+    Find table in OpenXML body where Cell(1,1) contains table_identifier_text.
+    Returns (table_index, table_elem) (1-based index) or (None, None).
+    """
+    needle = " ".join(str(table_identifier_text).lower().split())
+    seen = 0
+    tables = body_elem.findall(f".//{_TBL_TAG}")
+    for t_idx, tbl in enumerate(tables, 1):
+        rows = tbl.findall(_TR_TAG)
+        if not rows:
+            continue
+        cells = rows[0].findall(_TC_TAG)
+        if not cells:
+            continue
+        c1_text = clean_cell_text("".join(cells[0].itertext()))
+        if needle in c1_text.lower():
+            seen += 1
+            if seen == occurrence:
+                return t_idx, tbl
+    return None, None
+
+
+def modify_table_cell_openxml(body_elem, table_identifier_text, target_row, target_col,
+                              new_text, rev_id_gen=None, occurrence=1):
+    """
+    OpenXML equivalent of modify_table_cell.
+    Modifies cell at (target_row, target_col) with Track Changes revisions (del + ins).
+    """
+    if rev_id_gen is None:
+        rev_id_gen = [2000]
+
+    t_idx, tbl = find_table_by_header_openxml(body_elem, table_identifier_text, occurrence)
+    if tbl is None:
+        print(f"  [WARN] No OpenXML table #{occurrence} whose Cell(1,1) contains \"{table_identifier_text}\".")
+        return False
+
+    rows = tbl.findall(_TR_TAG)
+    if target_row < 1 or target_row > len(rows):
+        print(f"  [WARN] Table #{t_idx} target_row {target_row} out of bounds (1..{len(rows)}).")
+        return False
+
+    row = rows[target_row - 1]
+    cells = row.findall(_TC_TAG)
+    if target_col < 1 or target_col > len(cells):
+        print(f"  [WARN] Table #{t_idx} target_col {target_col} out of bounds (1..{len(cells)}).")
+        return False
+
+    cell = cells[target_col - 1]
+    old_text = clean_cell_text("".join(cell.itertext()))
+    value = new_text(old_text) if callable(new_text) else new_text
+    value = "" if value is None else str(value)
+
+    if old_text == clean_cell_text(value):
+        print(f"  [CELL-OPENXML] Table #{t_idx} Cell({target_row},{target_col}) already \"{old_text}\" — unchanged.")
+        return True
+
+    now_str = _get_iso_now()
+
+    # Track-delete existing paragraphs/runs in cell
+    p_elements = cell.findall(_P_TAG)
+    if not p_elements:
+        p_elem = ET.SubElement(cell, _P_TAG)
+        p_elements = [p_elem]
+
+    for p in p_elements:
+        delete_element_tracked_openxml(p, rev_id_gen)
+
+    # Insert new text inside a tracked ins element in the last paragraph
+    target_p = p_elements[-1]
+    ins_elem = ET.SubElement(target_p, _INS_TAG)
+    ins_elem.attrib[_w_tag("id")] = str(rev_id_gen[0])
+    ins_elem.attrib[_w_tag("author")] = REVISION_AUTHOR
+    ins_elem.attrib[_w_tag("date")] = now_str
+    rev_id_gen[0] += 1
+
+    r_elem = ET.SubElement(ins_elem, _R_TAG)
+    t_elem = ET.SubElement(r_elem, _T_TAG)
+    t_elem.text = value
+    t_elem.attrib["{http://www.w3.org/XML/1998/namespace}space"] = "preserve"
+
+    print(f"  [CELL-OPENXML] Table #{t_idx} Cell({target_row},{target_col}): \"{old_text}\" -> \"{value}\"")
+    return True
+
+
+def apply_table_cell_rules_openxml(body_elem, rules, rev_id_gen=None):
+    """Apply a list of table cell rules in OpenXML."""
+    applied = 0
+    for rule in rules or []:
+        if modify_table_cell_openxml(
+            body_elem,
+            rule["table"],
+            rule["row"],
+            rule["col"],
+            rule["text"],
+            rev_id_gen=rev_id_gen,
+            occurrence=rule.get("occurrence", 1)
+        ):
+            applied += 1
+    print(f"  [INFO] Applied {applied}/{len(rules or [])} table cell rule(s) (OpenXML).")
+    return applied
+
 # ============================================================================
 # OPENXML PACKAGE MERGE — images, charts, OLE objects, hyperlinks
 # ============================================================================
@@ -1548,7 +1662,7 @@ def _ensure_root_namespaces(xml_bytes, *ns_maps):
     return (text[:m.end(1)] + "".join(extra) + text[m.end(1):]).encode("utf-8")
 
 
-def run_migration_openxml(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+def run_migration_openxml(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None, table_cell_rules=None):
     """
     Pure-Python OpenXML pipeline. Runs anywhere without Word or external dependencies.
     """
@@ -1652,6 +1766,11 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
     del_inst_count = delete_red_italic_openxml(tmpl_body, rev_id_gen)
     print(f"  [INFO] Deleted {del_inst_count} red-italic instruction block(s).")
 
+    # ---- Apply table cell rules if requested ----
+    if table_cell_rules:
+        print(f"\n--- Applying table cell rules (OpenXML) ---")
+        apply_table_cell_rules_openxml(tmpl_body, table_cell_rules, rev_id_gen=rev_id_gen)
+
     report_progress(92, "Enabling Track Changes in settings...")
 
 
@@ -1701,7 +1820,7 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
 # UNIFIED CROSS-PLATFORM DISPATCHER
 # ============================================================================
 
-def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
+def run_migration(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None, table_cell_rules=None):
     """
     Cross-Platform Entry Point:
       - On Windows with pywin32: uses Word COM automation (run_migration_windows_com)
@@ -1714,7 +1833,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
                 reference_path=reference_path,
                 output_path=output_path,
                 target_report_type=target_report_type,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                table_cell_rules=table_cell_rules
             )
         except Exception as exc:
             print(f"[WARNING] Windows COM engine encountered an issue: {exc}. Falling back to OpenXML engine.")
@@ -1723,7 +1843,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
                 reference_path=reference_path,
                 output_path=output_path,
                 target_report_type=target_report_type,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                table_cell_rules=table_cell_rules
             )
     else:
         return run_migration_openxml(
@@ -1731,7 +1852,8 @@ def run_migration(template_path, reference_path, output_path=None, target_report
             reference_path=reference_path,
             output_path=output_path,
             target_report_type=target_report_type,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            table_cell_rules=table_cell_rules
         )
 
 

@@ -330,5 +330,77 @@ class OpenXmlImageMigrationTest(unittest.TestCase):
                 self.assertIn(f"xmlns:{prefix}=", root_tag, f"{part}: {prefix} undeclared")
 
 
+class TableCellTargetingTest(unittest.TestCase):
+
+    def test_clean_cell_text_strips_end_of_cell_markers(self):
+        # COM end-of-cell markers: \r\x07, internal \r, \x0b, \x07
+        raw_text = "Model Component\r\x07"
+        self.assertEqual(core.clean_cell_text(raw_text), "Model Component")
+
+        complex_text = " Line 1\rLine 2\x0bLine 3\r\x07 "
+        self.assertEqual(core.clean_cell_text(complex_text), "Line 1 Line 2 Line 3")
+
+    def test_modify_table_cell_openxml(self):
+        # Create a sample document XML with a table
+        table_xml = (
+            f'<w:body xmlns:w="{W}">'
+            + heading(1, "1. Overview")
+            + table([
+                ["Model Component", "Status", "Owner"],
+                ["PD Module", "Pending", "Risk Team"],
+                ["LGD Module", "Pending", "Credit Team"],
+            ])
+            + "</w:body>"
+        )
+        body_elem = ET.fromstring(table_xml)
+
+        # Modify cell at row 2, col 2 ("Status" for "PD Module")
+        success = core.modify_table_cell_openxml(
+            body_elem,
+            table_identifier_text="Model Component",
+            target_row=2,
+            target_col=2,
+            new_text="Approved"
+        )
+        self.assertTrue(success)
+
+        # Verify the cell contains tracked insertion and deletion
+        tbl = body_elem.find(f".//{{{W}}}tbl")
+        rows = tbl.findall(f"{{{W}}}tr")
+        target_cell = rows[1].findall(f"{{{W}}}tc")[1]
+
+        # Should have tracked deletion (del) and tracked insertion (ins)
+        del_elem = target_cell.find(f".//{{{W}}}del")
+        self.assertIsNotNone(del_elem, "Tracked deletion should exist")
+
+        ins_elem = target_cell.find(f".//{{{W}}}ins")
+        self.assertIsNotNone(ins_elem, "Tracked insertion should exist")
+        self.assertIn("Approved", "".join(ins_elem.itertext()))
+
+    def test_modify_table_cell_with_callable_action(self):
+        table_xml = (
+            f'<w:body xmlns:w="{W}">'
+            + table([
+                ["Model Component", "Count"],
+                ["PD Module", "10"],
+            ])
+            + "</w:body>"
+        )
+        body_elem = ET.fromstring(table_xml)
+
+        # Use callable action: append prefix
+        core.modify_table_cell_openxml(
+            body_elem,
+            table_identifier_text="Model Component",
+            target_row=2,
+            target_col=2,
+            new_text=lambda old: f"v{old}"
+        )
+        tbl = body_elem.find(f".//{{{W}}}tbl")
+        target_cell = tbl.findall(f"{{{W}}}tr")[1].findall(f"{{{W}}}tc")[1]
+        ins_elem = target_cell.find(f".//{{{W}}}ins")
+        self.assertIn("v10", "".join(ins_elem.itertext()))
+
+
 if __name__ == "__main__":
     unittest.main()
