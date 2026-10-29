@@ -19,13 +19,16 @@ Usage (CLI):
 import os
 import sys
 import re
+import io
 import time
 import shutil
 import argparse
 import copy
+import posixpath
 import zipfile
 import datetime
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 try:
     import win32com.client
@@ -1024,6 +1027,8 @@ def parse_docx_sections_openxml(body_elem):
     current_sec = None
 
     for idx, child in enumerate(children):
+        if child.tag == _w_tag("sectPr"):
+            continue  # document-level page setup, never part of a section body
         if child.tag == _P_TAG:
             lvl, text = get_heading_info_openxml(child)
             if lvl is not None and text:
@@ -1288,6 +1293,261 @@ def extract_cover_title_openxml(tree, fallback_name="Report"):
         clean_title = clean_title[:80].strip()
     return clean_title if clean_title else fallback_name
 
+# ============================================================================
+# OPENXML PACKAGE MERGE — images, charts, OLE objects, hyperlinks
+# ============================================================================
+#
+# In a .docx, an image inside a paragraph is only a pointer:
+#     <a:blip r:embed="rId7"/>  ->  word/_rels/document.xml.rels  ->  media/image1.png
+# Cloning the paragraph XML alone leaves "rId7" pointing at nothing (or at a
+# *different* image in the template). _PackageMerger re-creates every
+# relationship referenced by migrated XML, copies the target part (and that
+# part's own relationships, e.g. chart -> embedded workbook) under a
+# collision-free name, and registers the content type.
+
+R_NS        = OPENXML_NS['r']
+PKG_REL_NS  = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT_NS       = "http://schemas.openxmlformats.org/package/2006/content-types"
+_R_ATTR_PREFIX = f"{{{R_NS}}}"
+_DOCPR_TAG  = f"{{{OPENXML_NS['wp']}}}docPr"
+_SECTPR_TAG = _w_tag("sectPr")
+_REL_TAG      = f"{{{PKG_REL_NS}}}Relationship"
+_CT_DEFAULT   = f"{{{CT_NS}}}Default"
+_CT_OVERRIDE  = f"{{{CT_NS}}}Override"
+_MAIN_PART    = "word/document.xml"
+
+
+def _rels_path_for(part):
+    """'word/charts/chart1.xml' -> 'word/charts/_rels/chart1.xml.rels'"""
+    folder, name = posixpath.split(part)
+    return posixpath.join(folder, "_rels", name + ".rels")
+
+
+def _resolve_target(source_part, target):
+    """Resolve a relationship Target relative to its source part."""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
+
+
+def _xml_bytes(root, default_ns):
+    """
+    Serialize a flat package part (.rels / [Content_Types].xml) with its
+    namespace as the default xmlns, as Word expects. ElementTree's own
+    default_namespace option rejects their unqualified attributes (Id, Type).
+    """
+    def local(tag):
+        return tag.split("}", 1)[-1]
+
+    out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n',
+           f'<{local(root.tag)} xmlns="{default_ns}">']
+    for child in root:
+        attrs = "".join(f" {k}={quoteattr(v)}" for k, v in child.attrib.items())
+        out.append(f"<{local(child.tag)}{attrs}/>")
+    out.append(f"</{local(root.tag)}>")
+    return "".join(out).encode("utf-8")
+
+
+class _PackageMerger:
+    """Copies reference-package parts needed by migrated XML into the template."""
+
+    def __init__(self, dst_files, src_files):
+        self.dst = dst_files
+        self.src = src_files
+        self.part_map = {}   # src part path -> dst part path
+        self.rid_map = {}    # src document rId -> dst document rId
+        self.copied_parts = 0
+
+        self.src_doc_rels = {
+            rel.get("Id"): rel
+            for rel in self._load_xml(src_files, _rels_path_for(_MAIN_PART), "Relationships", PKG_REL_NS)
+        }
+        self.dst_doc_rels = self._load_xml(dst_files, _rels_path_for(_MAIN_PART), "Relationships", PKG_REL_NS)
+        self.src_ct = self._load_xml(src_files, "[Content_Types].xml", "Types", CT_NS)
+        self.dst_ct = self._load_xml(dst_files, "[Content_Types].xml", "Types", CT_NS)
+
+        self._used_rids = {rel.get("Id") for rel in self.dst_doc_rels}
+        self._next_docpr = 1 + max(
+            [int(e.get("id", "0")) for e in self._iter_dst_docpr() if e.get("id", "").isdigit()] or [0]
+        )
+
+    # ---- loading ----
+
+    @staticmethod
+    def _load_xml(files, path, root_name, ns):
+        data = files.get(path)
+        if data:
+            return ET.fromstring(data)
+        return ET.Element(f"{{{ns}}}{root_name}")
+
+    def _iter_dst_docpr(self):
+        data = self.dst.get(_MAIN_PART)
+        if not data:
+            return []
+        return ET.fromstring(data).iter(_DOCPR_TAG)
+
+    # ---- public API ----
+
+    def import_element(self, elem):
+        """Re-link r:* attributes and de-duplicate drawing ids on a cloned element."""
+        for node in elem.iter():
+            for attr, val in list(node.attrib.items()):
+                if attr.startswith(_R_ATTR_PREFIX):
+                    new_rid = self._map_doc_rid(val)
+                    if new_rid:
+                        node.set(attr, new_rid)
+            if node.tag == _DOCPR_TAG:          # each drawing needs a unique id
+                node.set("id", str(self._next_docpr))
+                self._next_docpr += 1
+
+    def finalize(self):
+        """Write merged document rels + content types back into dst_files."""
+        self.dst[_rels_path_for(_MAIN_PART)] = _xml_bytes(self.dst_doc_rels, PKG_REL_NS)
+        self.dst["[Content_Types].xml"] = _xml_bytes(self.dst_ct, CT_NS)
+
+    # ---- relationships ----
+
+    def _new_rid(self):
+        n = len(self._used_rids) + 1
+        while f"rId{n}" in self._used_rids:
+            n += 1
+        rid = f"rId{n}"
+        self._used_rids.add(rid)
+        return rid
+
+    def _map_doc_rid(self, src_rid):
+        if src_rid in self.rid_map:
+            return self.rid_map[src_rid]
+        rel = self.src_doc_rels.get(src_rid)
+        if rel is None:
+            return None
+
+        mode = rel.get("TargetMode")
+        if mode == "External":                  # hyperlinks, linked pictures
+            new_target = rel.get("Target")
+        else:
+            dst_part = self._copy_part(_resolve_target(_MAIN_PART, rel.get("Target")))
+            if dst_part is None:
+                return None
+            new_target = posixpath.relpath(dst_part, posixpath.dirname(_MAIN_PART))
+
+        new_rid = self._new_rid()
+        new_rel = ET.SubElement(self.dst_doc_rels, _REL_TAG)
+        new_rel.set("Id", new_rid)
+        new_rel.set("Type", rel.get("Type"))
+        new_rel.set("Target", new_target)
+        if mode:
+            new_rel.set("TargetMode", mode)
+        self.rid_map[src_rid] = new_rid
+        return new_rid
+
+    # ---- parts ----
+
+    def _unique_part_name(self, src_part):
+        if src_part not in self.dst:
+            return src_part
+        stem, ext = posixpath.splitext(src_part)
+        n = 1
+        while f"{stem}_ref{n}{ext}" in self.dst:
+            n += 1
+        return f"{stem}_ref{n}{ext}"
+
+    def _copy_part(self, src_part):
+        """Copy a part (+ its own rels, recursively). Returns the dst part path."""
+        if src_part in self.part_map:
+            return self.part_map[src_part]
+        if src_part not in self.src:
+            print(f"  [WARN] Reference part missing, cannot copy: {src_part}")
+            return None
+
+        dst_part = self._unique_part_name(src_part)
+        self.part_map[src_part] = dst_part      # register first (cycle-safe)
+        self.dst[dst_part] = self.src[src_part]
+        self._register_content_type(src_part, dst_part)
+        self.copied_parts += 1
+
+        src_rels = _rels_path_for(src_part)
+        if src_rels in self.src:                # e.g. chart -> embedded .xlsx
+            rels_root = ET.fromstring(self.src[src_rels])
+            for rel in rels_root:
+                if rel.get("TargetMode") == "External":
+                    continue
+                child_dst = self._copy_part(_resolve_target(src_part, rel.get("Target")))
+                if child_dst:
+                    rel.set("Target", posixpath.relpath(child_dst, posixpath.dirname(dst_part)))
+            self.dst[_rels_path_for(dst_part)] = _xml_bytes(rels_root, PKG_REL_NS)
+        return dst_part
+
+    def _register_content_type(self, src_part, dst_part):
+        src_name, dst_name = "/" + src_part, "/" + dst_part
+        for ov in self.src_ct.iter(_CT_OVERRIDE):
+            if ov.get("PartName", "").lower() == src_name.lower():
+                new_ov = ET.SubElement(self.dst_ct, _CT_OVERRIDE)
+                new_ov.set("PartName", dst_name)
+                new_ov.set("ContentType", ov.get("ContentType"))
+                return
+
+        ext = posixpath.splitext(dst_part)[1].lstrip(".").lower()
+        if any(d.get("Extension", "").lower() == ext for d in self.dst_ct.iter(_CT_DEFAULT)):
+            return
+        for d in self.src_ct.iter(_CT_DEFAULT):
+            if d.get("Extension", "").lower() == ext:
+                new_d = ET.Element(_CT_DEFAULT)
+                new_d.set("Extension", d.get("Extension"))
+                new_d.set("ContentType", d.get("ContentType"))
+                self.dst_ct.insert(0, new_d)    # Defaults conventionally first
+                return
+        print(f"  [WARN] No content type found for {dst_part}")
+
+
+def _strip_section_breaks(elem):
+    """Remove paragraph-level section breaks (they carry reference headers/footers)."""
+    for pPr in elem.iter(_PPR_TAG):
+        for sect in pPr.findall(_SECTPR_TAG):
+            pPr.remove(sect)
+
+
+def _collect_namespaces(xml_bytes):
+    """Return {prefix: uri} for every namespace declared in an XML part."""
+    ns = {}
+    for _event, (prefix, uri) in ET.iterparse(io.BytesIO(xml_bytes), events=("start-ns",)):
+        ns.setdefault(prefix, uri)
+    return ns
+
+
+def _register_namespaces(ns_map):
+    """Keep Word's original prefixes (w14, wp14, a, pic, ...) when re-serializing."""
+    for prefix, uri in ns_map.items():
+        if not prefix:
+            continue
+        try:
+            ET.register_namespace(prefix, uri)
+        except ValueError:
+            pass  # reserved prefix such as ns0
+
+
+def _ensure_root_namespaces(xml_bytes, *ns_maps):
+    """
+    ElementTree drops namespace declarations that no element uses, but Word's
+    mc:Ignorable="w14 wp14 ..." still references those prefixes; a missing
+    declaration makes Word report the file as corrupt. Re-add them on the root.
+    """
+    text = xml_bytes.decode("utf-8")
+    m = re.search(r"<(?![?!])([^\s>/]+)([^>]*)>", text)
+    if not m:
+        return xml_bytes
+    declared = set(re.findall(r"xmlns:([\w.\-]+)=", m.group(2)))
+    extra = []
+    for ns_map in ns_maps:
+        for prefix, uri in ns_map.items():
+            if prefix and prefix not in declared:
+                extra.append(f' xmlns:{prefix}="{uri}"')
+                declared.add(prefix)
+    if not extra:
+        return xml_bytes
+    return (text[:m.end(1)] + "".join(extra) + text[m.end(1):]).encode("utf-8")
+
+
 def run_migration_openxml(template_path, reference_path, output_path=None, target_report_type="Assessment", progress_callback=None):
     """
     Pure-Python OpenXML pipeline. Runs anywhere without Word or external dependencies.
@@ -1323,6 +1583,13 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
 
     report_progress(20, "Detecting cover title and configuring output path...")
 
+    # Register the documents' own prefixes so ET re-serializes w14/wp14/a/pic
+    # etc. unchanged (Word rejects files whose mc:Ignorable prefixes vanish).
+    tmpl_ns = _collect_namespaces(tmpl_files["word/document.xml"])
+    ref_ns = _collect_namespaces(ref_files["word/document.xml"])
+    _register_namespaces(ref_ns)
+    _register_namespaces(tmpl_ns)
+
     tmpl_tree = ET.ElementTree(ET.fromstring(tmpl_files["word/document.xml"]))
     tmpl_root = tmpl_tree.getroot()
     tmpl_body = tmpl_root.find(_BODY_TAG)
@@ -1354,6 +1621,9 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
 
     report_progress(50, "Migrating matched sections with Track Changes...")
 
+    # Re-links images / charts / OLE / hyperlinks referenced by migrated XML
+    merger = _PackageMerger(tmpl_files, ref_files)
+
     migrated_count = 0
     for s in reversed(tmpl_sections):
         k = s['key']
@@ -1365,11 +1635,18 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
                 insert_pos = h_idx + 1
                 for ref_elem in ref_s['body_elements']:
                     clone = ET.fromstring(ET.tostring(ref_elem))
+                    _strip_section_breaks(clone)
+                    merger.import_element(clone)
                     wrap_in_tracked_ins_openxml(clone, rev_id_gen)
                     tmpl_body.insert(insert_pos, clone)
                     insert_pos += 1
                 migrated_count += 1
                 print(f"  [MIGRATE] Migrated: {s['text']}")
+
+    merger.finalize()
+    if merger.copied_parts:
+        print(f"  [INFO] Copied {merger.copied_parts} embedded part(s) "
+              f"(images/charts/objects) from reference.")
 
     report_progress(75, "Scanning and deleting red-italic instructions...")
     del_inst_count = delete_red_italic_openxml(tmpl_body, rev_id_gen)
@@ -1380,20 +1657,20 @@ def run_migration_openxml(template_path, reference_path, output_path=None, targe
 
     settings_data = tmpl_files.get("word/settings.xml", None)
     if settings_data is not None:
+        settings_ns = _collect_namespaces(settings_data)
+        _register_namespaces(settings_ns)
         s_tree = ET.ElementTree(ET.fromstring(settings_data))
         s_root = s_tree.getroot()
         if s_root.find(_TRACK_REV_TAG) is None:
             ET.SubElement(s_root, _TRACK_REV_TAG)
-        tmpl_files["word/settings.xml"] = ET.tostring(s_root, encoding="utf-8", xml_declaration=True)
+        tmpl_files["word/settings.xml"] = _ensure_root_namespaces(
+            ET.tostring(s_root, encoding="utf-8", xml_declaration=True), settings_ns)
     else:
         new_settings = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:settings xmlns:w="{W_NS}"><w:trackRevisions/></w:settings>'
         tmpl_files["word/settings.xml"] = new_settings.encode("utf-8")
 
-    tmpl_files["word/document.xml"] = ET.tostring(tmpl_root, encoding="utf-8", xml_declaration=True)
-
-    for r_name, r_bytes in ref_files.items():
-        if r_name.startswith("word/media/") and r_name not in tmpl_files:
-            tmpl_files[r_name] = r_bytes
+    tmpl_files["word/document.xml"] = _ensure_root_namespaces(
+        ET.tostring(tmpl_root, encoding="utf-8", xml_declaration=True), tmpl_ns, ref_ns)
 
     report_progress(96, f"Writing output package -> {os.path.basename(output_path)}...")
 
