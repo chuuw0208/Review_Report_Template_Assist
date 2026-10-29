@@ -571,6 +571,147 @@ def remove_affirmation_excluded_sections(template_doc):
 
 
 
+# ============================================================================
+# TABLE CELL TARGETING (COM)
+# ============================================================================
+#
+# Every Word table cell's Range.Text ends with the END-OF-CELL marker, which
+# COM returns as "\r\x07" (CR + BEL). Inside a cell, "\r" also separates
+# paragraphs and "\x0b" is a manual line break (Shift+Enter). None of these
+# are visible content, so they must be stripped before comparing strings.
+
+WD_CHARACTER       = 1          # wdCharacter (unit for Range.MoveEnd)
+WD_COLOR_AUTOMATIC = -16777216  # wdColorAutomatic
+
+
+def clean_cell_text(raw_text):
+    """
+    Return the visible text of a Word table cell read via COM.
+
+        clean_cell_text("Model Component\\r\\x07")        -> "Model Component"
+        clean_cell_text("Line 1\\rLine 2\\x0bMore\\r\\x07") -> "Line 1 Line 2 More"
+    """
+    if not raw_text:
+        return ""
+    # 1. Drop the trailing end-of-cell marker (any mix of \r and \x07).
+    text = raw_text.rstrip("\r\x07")
+    # 2. Internal paragraph / line breaks / stray BELs -> spaces.
+    for ch in ("\r", "\x0b", "\x07"):
+        text = text.replace(ch, " ")
+    # 3. Collapse whitespace.
+    return " ".join(text.split())
+
+
+def find_table_by_header(doc, table_identifier_text, occurrence=1):
+    """
+    Return (table_index, table) for the Nth (occurrence, 1-based) table in
+    doc.Tables whose Cell(1, 1) contains table_identifier_text
+    (case/whitespace-insensitive). Returns (None, None) when no table matches.
+    """
+    needle = " ".join(str(table_identifier_text).lower().split())
+    seen = 0
+    for t_idx in range(1, doc.Tables.Count + 1):
+        table = doc.Tables.Item(t_idx)
+        try:
+            header = clean_cell_text(table.Cell(1, 1).Range.Text)
+        except Exception:
+            continue  # Cell(1,1) unavailable (unusual merged layout)
+        if needle in header.lower():
+            seen += 1
+            if seen == occurrence:
+                return t_idx, table
+    return None, None
+
+
+def _clear_inherited_instruction_format(rng):
+    """
+    Text inserted into a cell inherits the formatting of the character before
+    it. If that was red italic instruction text, the new value would look like
+    an instruction, so reset italic + colour on the inserted range only.
+    """
+    try:
+        font = rng.Font
+        if font.Italic in (True, -1) and is_red(font.Color, font.ColorIndex):
+            font.Italic = False
+            font.Color = WD_COLOR_AUTOMATIC
+    except Exception:
+        pass
+
+
+def modify_table_cell(doc, table_identifier_text, target_row, target_col, new_text,
+                      occurrence=1):
+    """
+    Replace the content of one cell in the table identified by its Cell(1,1).
+
+    Args:
+        doc:                   Word Document (COM).
+        table_identifier_text: text that Cell(1,1) must contain, e.g. "Model Component".
+        target_row/target_col: 1-based cell coordinates (Word's Cell(row, col)).
+        new_text:              str, or callable(old_text) -> str for per-cell
+                               actions (e.g. append, prefix, conditional fill).
+        occurrence:            which matching table to edit (1 = first).
+
+    With TrackRevisions ON, the change is recorded as a deletion of the old
+    text + insertion of the new text. Returns True if the cell was found
+    (changed or already up to date), False otherwise.
+    """
+    t_idx, table = find_table_by_header(doc, table_identifier_text, occurrence)
+    if table is None:
+        print(f"  [WARN] No table #{occurrence} whose Cell(1,1) contains "
+              f"\"{table_identifier_text}\".")
+        return False
+
+    try:
+        cell = table.Cell(target_row, target_col)
+    except Exception as exc:
+        print(f"  [WARN] Table #{t_idx} (\"{table_identifier_text}\") has no "
+              f"Cell({target_row},{target_col}): {exc}")
+        return False
+
+    old_text = clean_cell_text(cell.Range.Text)
+    value = new_text(old_text) if callable(new_text) else new_text
+    value = "" if value is None else str(value)
+
+    if old_text == clean_cell_text(value):
+        print(f"  [CELL] Table #{t_idx} Cell({target_row},{target_col}) already "
+              f"\"{old_text}\" — unchanged.")
+        return True
+
+    # Cell content WITHOUT the end-of-cell marker. Shrinking by one character
+    # means the marker itself is never deleted, so the table structure is safe.
+    content = cell.Range
+    content.MoveEnd(WD_CHARACTER, -1)
+    if content.End > content.Start:
+        content.Delete()                       # tracked deletion of old text
+
+    # Insert at the point just before the end-of-cell marker.
+    insert_pos = table.Cell(target_row, target_col).Range.End - 1
+    inserted = doc.Range(insert_pos, insert_pos)
+    inserted.InsertAfter(value)                # tracked insertion; range expands
+    _clear_inherited_instruction_format(inserted)
+
+    print(f"  [CELL] Table #{t_idx} Cell({target_row},{target_col}): "
+          f"\"{old_text}\" -> \"{value}\"")
+    return True
+
+
+def apply_table_cell_rules(doc, rules):
+    """
+    Apply a list of per-cell rules to a COM document. Each rule is a dict:
+        {"table": "Model Component", "row": 2, "col": 3, "text": "Approved"}
+    where "text" may also be callable(old_text) -> new_text, and an optional
+    "occurrence" (default 1) selects which matching table to edit.
+    Returns the number of rules that found their target cell.
+    """
+    applied = 0
+    for rule in rules or []:
+        if modify_table_cell(doc, rule["table"], rule["row"], rule["col"], rule["text"],
+                             occurrence=rule.get("occurrence", 1)):
+            applied += 1
+    print(f"  [INFO] Applied {applied}/{len(rules or [])} table cell rule(s).")
+    return applied
+
+
 def extract_cover_title(doc, fallback_name="Report"):
     """
     Extract the title from the cover page (title page) of the document.
