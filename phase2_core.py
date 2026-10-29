@@ -313,7 +313,10 @@ def copy_paste_section(reference_doc, template_doc, src_start, src_end, dest_pos
             last_exc = exc
             print(f"  [WARN] Copy/Paste attempt {attempt}/{retries} failed: {exc}")
             _settle_clipboard(CLIPBOARD_SETTLE_MS * attempt * 2)
-    raise last_exc
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Copy/Paste failed after {retries} attempt(s).")
 
 
 # ============================================================================
