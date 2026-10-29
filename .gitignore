@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+~$*.docx
+*_Draft.docx
+test_output_assessment.docx
